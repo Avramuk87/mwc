@@ -24,7 +24,9 @@
 
 <body>
 <h1>MWC — A1 (пины &gt;4 мм)</h1>
-<div class="small">Фото из <b>галереи</b>. Если OpenCV долго грузится — нажми «Перезагрузить OpenCV».</div>
+<div class="small">
+Открыто из Safari. Если OpenCV не готов — нажми «Перезагрузить OpenCV».
+</div>
 
 <div class="card">
   <b>Выбери фото</b>
@@ -50,57 +52,85 @@ const reloadBtn = document.getElementById("reload");
 const canvas= document.getElementById("cv");
 
 let cvIsReady = false;
-let cvLoadStartedAt = Date.now();
 
 function set(t, cls=""){ out.className = cls; out.textContent = t; }
 function hasFile(){ return input.files && input.files[0]; }
 
 function updateUI(){
   btn.disabled = !(cvIsReady && hasFile());
-  if (!cvIsReady) hint.textContent = "Жду загрузки OpenCV… (может занять 30–90 сек в первый раз)";
+  if (!cvIsReady) hint.textContent = "Жду загрузки OpenCV… (иногда 30–90 сек в первый раз)";
   else if (!hasFile()) hint.textContent = "OpenCV готов. Выбери фото.";
   else hint.textContent = "Готово. Нажми «АНАЛИЗ».";
 }
 
-// --- robust OpenCV loader (with cache-bust + retry) ---
-function loadOpenCV(){
+// --- OpenCV loader with fallback CDN ---
+function loadScript(src){
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.async = true;
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error("load failed: " + src));
+    document.head.appendChild(s);
+  });
+}
+
+async function loadOpenCV(){
   cvIsReady = false;
   updateUI();
+  reloadBtn.style.display = "none";
 
-  // remove old script if exists
-  const old = document.getElementById("opencvjs");
-  if (old) old.remove();
+  // cleanup previous script tags (optional)
+  [...document.querySelectorAll("script[data-opencv]")].forEach(x => x.remove());
 
-  // cache bust to avoid stale versions
   const v = Date.now();
-  const s = document.createElement("script");
-  s.id = "opencvjs";
-  s.async = true;
-  s.src = "https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js?v=" + v;
+  const sources = [
+    `https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js?v=${v}`,
+    `https://unpkg.com/opencv.js@1.2.1/opencv.js?v=${v}`
+  ];
 
-  s.onload = () => {
-    // when runtime initialized -> ready
-    if (typeof cv !== "undefined") {
-      cv["onRuntimeInitialized"] = () => {
-        cvIsReady = true;
-        reloadBtn.style.display = "none";
-        updateUI();
-      };
+  let loaded = false;
+  for (const src of sources){
+    try{
+      const s = document.createElement("script");
+      s.async = true;
+      s.src = src;
+      s.setAttribute("data-opencv","1");
+      document.head.appendChild(s);
+
+      await new Promise((resolve, reject) => {
+        s.onload = resolve;
+        s.onerror = reject;
+      });
+
+      loaded = true;
+      break;
+    }catch(e){
+      // try next source
     }
-  };
+  }
 
-  s.onerror = () => {
-    hint.textContent = "Не удалось загрузить OpenCV (CDN). Проверь интернет/блокировщики и нажми «Перезагрузить OpenCV».";
+  if (!loaded){
+    hint.textContent = "Не удалось загрузить OpenCV. Проверь интернет/блокировщик и нажми «Перезагрузить OpenCV».";
     reloadBtn.style.display = "block";
+    return;
+  }
+
+  // wait runtime init
+  if (typeof cv === "undefined"){
+    hint.textContent = "OpenCV скрипт загрузился, но cv не появился. Нажми «Перезагрузить OpenCV».";
+    reloadBtn.style.display = "block";
+    return;
+  }
+
+  cv["onRuntimeInitialized"] = () => {
+    cvIsReady = true;
+    reloadBtn.style.display = "none";
+    updateUI();
   };
 
-  document.head.appendChild(s);
-  cvLoadStartedAt = Date.now();
-
-  // if still not ready after 25 sec -> show reload button
-  setTimeout(() => {
-    if (!cvIsReady) reloadBtn.style.display = "block";
-  }, 25000);
+  // if still not ready after 25s -> show reload
+  setTimeout(() => { if (!cvIsReady) reloadBtn.style.display = "block"; }, 25000);
 }
 
 reloadBtn.addEventListener("click", () => loadOpenCV());
@@ -163,7 +193,7 @@ btn.addEventListener("click", async () => {
     const hier = new cv.Mat();
     cv.findContours(bin, cont, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    // A1: пока мм приблизительно (A1.5 сделаем автокалибровку по рамке)
+    // A1: пока мм приблизительно
     const mmPerPx = 200/800;
 
     let count = 0, sum = 0;
@@ -186,8 +216,7 @@ btn.addEventListener("click", async () => {
         const x = m.m10 / m.m00;
         const y = m.m01 / m.m00;
         cv.circle(outMat, new cv.Point(x,y), Math.max(6, dpx/2), new cv.Scalar(0,255,0,255), 2);
-        count++;
-        sum += dmm;
+        count++; sum += dmm;
       }
       c.delete();
     }
@@ -204,7 +233,6 @@ btn.addEventListener("click", async () => {
   }
 });
 
-// стартуем загрузку OpenCV сразу
 updateUI();
 loadOpenCV();
 </script>
