@@ -18,25 +18,23 @@
   .ok{color:#0a7;font-weight:700}
   .warn{color:#c90;font-weight:700}
   .bad{color:#c00;font-weight:700}
+  .ghost{background:#fff;color:#111}
 </style>
 </head>
 
 <body>
-<h1>MWC — A1 (подсчёт пинов &gt;4 мм)</h1>
-<div class="small">
-Выбор фото из <b>галереи</b>. Для точности: рамка 20×20 см полностью в кадре, строго сверху, меньше бликов.
-</div>
+<h1>MWC — A1 (пины &gt;4 мм)</h1>
+<div class="small">Фото из <b>галереи</b>. Если OpenCV долго грузится — нажми «Перезагрузить OpenCV».</div>
 
 <div class="card">
   <b>Выбери фото</b>
   <input id="img" type="file" accept="image/*">
   <button id="btn" disabled>АНАЛИЗ</button>
-  <div class="small" id="hint">Жду загрузки OpenCV…</div>
+  <button id="reload" class="ghost" style="margin-top:8px; display:none;">Перезагрузить OpenCV</button>
+  <div class="small" id="hint">Загрузка OpenCV…</div>
 </div>
 
-<div class="card">
-  <pre id="out">Загрузи фото.</pre>
-</div>
+<div class="card"><pre id="out">Загрузи фото.</pre></div>
 
 <div class="card">
   <canvas id="cv"></canvas>
@@ -44,142 +42,171 @@
 </div>
 
 <script>
-  const input = document.getElementById("img");
-  const btn   = document.getElementById("btn");
-  const out   = document.getElementById("out");
-  const hint  = document.getElementById("hint");
-  const canvas= document.getElementById("cv");
+const input = document.getElementById("img");
+const btn   = document.getElementById("btn");
+const out   = document.getElementById("out");
+const hint  = document.getElementById("hint");
+const reloadBtn = document.getElementById("reload");
+const canvas= document.getElementById("cv");
 
-  let cvIsReady = false;
+let cvIsReady = false;
+let cvLoadStartedAt = Date.now();
 
-  function set(t, cls="") { out.className = cls; out.textContent = t; }
-  function hasFile() { return input.files && input.files[0]; }
-  function updateBtn() {
-    btn.disabled = !(cvIsReady && hasFile());
-    if (!cvIsReady) hint.textContent = "Жду загрузки OpenCV… (5–20 сек)";
-    else if (!hasFile()) hint.textContent = "Выбери фото из галереи.";
-    else hint.textContent = "Готово. Нажми «АНАЛИЗ».";
-  }
+function set(t, cls=""){ out.className = cls; out.textContent = t; }
+function hasFile(){ return input.files && input.files[0]; }
 
-  input.addEventListener("change", () => {
-    if (hasFile()) set("Фото выбрано. Нажми «АНАЛИЗ».");
-    else set("Загрузи фото.");
-    updateBtn();
-  });
+function updateUI(){
+  btn.disabled = !(cvIsReady && hasFile());
+  if (!cvIsReady) hint.textContent = "Жду загрузки OpenCV… (может занять 30–90 сек в первый раз)";
+  else if (!hasFile()) hint.textContent = "OpenCV готов. Выбери фото.";
+  else hint.textContent = "Готово. Нажми «АНАЛИЗ».";
+}
 
-  function fileToImg(f){
-    return new Promise((resolve, reject) => {
-      const i = new Image();
-      i.onload = () => resolve(i);
-      i.onerror = reject;
-      i.src = URL.createObjectURL(f);
-    });
-  }
+// --- robust OpenCV loader (with cache-bust + retry) ---
+function loadOpenCV(){
+  cvIsReady = false;
+  updateUI();
 
-  function matFromImg(i){
-    const c = document.createElement("canvas");
-    c.width = i.naturalWidth;
-    c.height = i.naturalHeight;
-    c.getContext("2d").drawImage(i, 0, 0);
-    const ctx = c.getContext("2d");
-    const id = ctx.getImageData(0,0,c.width,c.height);
-    return cv.matFromImageData(id);
-  }
+  // remove old script if exists
+  const old = document.getElementById("opencvjs");
+  if (old) old.remove();
 
-  function drawRGBA(matRGBA){
-    canvas.width = matRGBA.cols;
-    canvas.height = matRGBA.rows;
-    const imgData = new ImageData(new Uint8ClampedArray(matRGBA.data), matRGBA.cols, matRGBA.rows);
-    canvas.getContext("2d").putImageData(imgData, 0, 0);
-  }
+  // cache bust to avoid stale versions
+  const v = Date.now();
+  const s = document.createElement("script");
+  s.id = "opencvjs";
+  s.async = true;
+  s.src = "https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js?v=" + v;
 
-  btn.addEventListener("click", async () => {
-    if (btn.disabled) return;
-    btn.disabled = true;
-    set("Анализ…");
-
-    try {
-      const img = await fileToImg(input.files[0]);
-      const mat = matFromImg(img);
-
-      // 1) Gray
-      const gray = new cv.Mat();
-      cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-
-      // 2) Blur
-      cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
-
-      // 3) Threshold (белое)
-      const bin = new cv.Mat();
-      cv.threshold(gray, bin, 200, 255, cv.THRESH_BINARY);
-
-      // 4) Cleanup
-      const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));
-      cv.morphologyEx(bin, bin, cv.MORPH_OPEN, k);
-      cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k);
-
-      // 5) Contours
-      const cont = new cv.MatVector();
-      const hier = new cv.Mat();
-      cv.findContours(bin, cont, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-      // ⚠️ Пока калибровка упрощённая (A1). В A1.5 сделаем автокалибровку по рамке.
-      const mmPerPx = 200 / 800; // приближённо
-
-      let count = 0, sum = 0;
-      const outMat = mat.clone();
-
-      for (let i=0; i<cont.size(); i++){
-        const c = cont.get(i);
-        const area = cv.contourArea(c);
-        if (area < 30) { c.delete(); continue; }
-
-        const dpx = 2 * Math.sqrt(area / Math.PI);
-        const dmm = dpx * mmPerPx;
-
-        // фильтр по округлости (чтобы меньше ловить “паутину”)
-        const peri = cv.arcLength(c, true);
-        const circ = (peri>0) ? (4*Math.PI*area/(peri*peri)) : 0;
-        if (circ < 0.55) { c.delete(); continue; }
-
-        if (dmm >= 4){
-          const m = cv.moments(c);
-          const x = m.m10 / m.m00;
-          const y = m.m01 / m.m00;
-
-          cv.circle(outMat, new cv.Point(x,y), Math.max(6, dpx/2), new cv.Scalar(0,255,0,255), 2);
-
-          count++;
-          sum += dmm;
-        }
-        c.delete();
-      }
-
-      const avg = count ? (sum/count).toFixed(1) : "0.0";
-      set(`Пинов >4 мм: ${count}\nСредний диаметр: ${avg} мм`, count ? "ok" : "bad");
-      drawRGBA(outMat);
-
-      // cleanup
-      mat.delete(); gray.delete(); bin.delete(); k.delete(); cont.delete(); hier.delete(); outMat.delete();
-
-    } catch (e) {
-      set("Ошибка анализа: " + String(e), "bad");
-    } finally {
-      updateBtn();
+  s.onload = () => {
+    // when runtime initialized -> ready
+    if (typeof cv !== "undefined") {
+      cv["onRuntimeInitialized"] = () => {
+        cvIsReady = true;
+        reloadBtn.style.display = "none";
+        updateUI();
+      };
     }
-  });
-
-  // --- Load OpenCV ---
-  window.onOpenCvReady = function() {
-    cvIsReady = true;
-    updateBtn();
   };
 
-  updateBtn();
+  s.onerror = () => {
+    hint.textContent = "Не удалось загрузить OpenCV (CDN). Проверь интернет/блокировщики и нажми «Перезагрузить OpenCV».";
+    reloadBtn.style.display = "block";
+  };
+
+  document.head.appendChild(s);
+  cvLoadStartedAt = Date.now();
+
+  // if still not ready after 25 sec -> show reload button
+  setTimeout(() => {
+    if (!cvIsReady) reloadBtn.style.display = "block";
+  }, 25000);
+}
+
+reloadBtn.addEventListener("click", () => loadOpenCV());
+
+input.addEventListener("change", () => {
+  if (hasFile()) set("Фото выбрано. Нажми «АНАЛИЗ».");
+  else set("Загрузи фото.");
+  updateUI();
+});
+
+// --- helpers ---
+function fileToImg(f){
+  return new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = URL.createObjectURL(f);
+  });
+}
+
+function matFromImg(i){
+  const c = document.createElement("canvas");
+  c.width = i.naturalWidth;
+  c.height = i.naturalHeight;
+  c.getContext("2d").drawImage(i, 0, 0);
+  const ctx = c.getContext("2d");
+  const id = ctx.getImageData(0,0,c.width,c.height);
+  return cv.matFromImageData(id);
+}
+
+function drawRGBA(matRGBA){
+  canvas.width = matRGBA.cols;
+  canvas.height = matRGBA.rows;
+  const imgData = new ImageData(new Uint8ClampedArray(matRGBA.data), matRGBA.cols, matRGBA.rows);
+  canvas.getContext("2d").putImageData(imgData, 0, 0);
+}
+
+// --- analysis ---
+btn.addEventListener("click", async () => {
+  if (btn.disabled) return;
+  btn.disabled = true;
+  set("Анализ…");
+
+  try {
+    const img = await fileToImg(input.files[0]);
+    const mat = matFromImg(img);
+
+    const gray = new cv.Mat();
+    cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
+
+    const bin = new cv.Mat();
+    cv.threshold(gray, bin, 200, 255, cv.THRESH_BINARY);
+
+    const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));
+    cv.morphologyEx(bin, bin, cv.MORPH_OPEN, k);
+    cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k);
+
+    const cont = new cv.MatVector();
+    const hier = new cv.Mat();
+    cv.findContours(bin, cont, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    // A1: пока мм приблизительно (A1.5 сделаем автокалибровку по рамке)
+    const mmPerPx = 200/800;
+
+    let count = 0, sum = 0;
+    const outMat = mat.clone();
+
+    for (let i=0; i<cont.size(); i++){
+      const c = cont.get(i);
+      const area = cv.contourArea(c);
+      if (area < 30) { c.delete(); continue; }
+
+      const peri = cv.arcLength(c, true);
+      const circ = (peri>0) ? (4*Math.PI*area/(peri*peri)) : 0;
+      if (circ < 0.55) { c.delete(); continue; }
+
+      const dpx = 2 * Math.sqrt(area / Math.PI);
+      const dmm = dpx * mmPerPx;
+
+      if (dmm >= 4){
+        const m = cv.moments(c);
+        const x = m.m10 / m.m00;
+        const y = m.m01 / m.m00;
+        cv.circle(outMat, new cv.Point(x,y), Math.max(6, dpx/2), new cv.Scalar(0,255,0,255), 2);
+        count++;
+        sum += dmm;
+      }
+      c.delete();
+    }
+
+    const avg = count ? (sum/count).toFixed(1) : "0.0";
+    set(`Пинов >4 мм: ${count}\nСредний диаметр: ${avg} мм`, count ? "ok" : "bad");
+    drawRGBA(outMat);
+
+    mat.delete(); gray.delete(); bin.delete(); k.delete(); cont.delete(); hier.delete(); outMat.delete();
+  } catch (e) {
+    set("Ошибка анализа: " + String(e), "bad");
+  } finally {
+    updateUI();
+  }
+});
+
+// стартуем загрузку OpenCV сразу
+updateUI();
+loadOpenCV();
 </script>
-
-<script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"
-        onload="cv['onRuntimeInitialized']=onOpenCvReady"></script>
-
 </body>
 </html>
