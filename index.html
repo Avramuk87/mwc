@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1</title>
+<title>MWC — A1.5</title>
 <meta name="theme-color" content="#111111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -22,9 +22,9 @@
 </head>
 
 <body>
-<h1>MWC — A1 (пины &gt;4 мм) — без OpenCV</h1>
+<h1>MWC — A1.5 (пины &gt;4 мм) — без OpenCV</h1>
 <div class="small">
-Фото из <b>галереи</b>. Алгоритм: порог по «белому» + поиск пятен (connected components) + фильтр по форме.
+Улучшенный поиск: выравнивание освещения + адаптивный порог + компоненты + фильтр формы.
 </div>
 
 <div class="card">
@@ -38,7 +38,7 @@
 
 <div class="card">
   <canvas id="cv"></canvas>
-  <div class="small">Найденные пины &gt;4 мм обведены зелёным.</div>
+  <div class="small">Зелёным — найденные пины &gt;4 мм.</div>
 </div>
 
 <script>
@@ -57,8 +57,7 @@ function updateUI(){
 updateUI();
 
 input.addEventListener("change", () => {
-  if (hasFile()) set("Фото выбрано. Нажми «АНАЛИЗ».");
-  else set("Загрузи фото.");
+  set(hasFile() ? "Фото выбрано. Нажми «АНАЛИЗ»." : "Загрузи фото.");
   updateUI();
 });
 
@@ -72,159 +71,202 @@ function fileToImg(f){
 }
 
 function drawCircle(ctx, x, y, r){
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI*2);
-  ctx.stroke();
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
 }
 
-// Connected components on binary image
-function analyzeImage(img){
-  // 1) draw & downscale for speed
-  const maxSide = 900; // iPhone-friendly
-  const w0 = img.naturalWidth, h0 = img.naturalHeight;
-  const scale = Math.min(1, maxSide / Math.max(w0, h0));
-  const w = Math.max(1, Math.round(w0 * scale));
-  const h = Math.max(1, Math.round(h0 * scale));
+// --- Fast box blur using integral image ---
+function boxBlurGray(src, w, h, radius){
+  const dst = new Float32Array(w*h);
+  const r = radius|0;
+  const iw = w+1;
+  const integ = new Float32Array((w+1)*(h+1));
 
-  const off = document.createElement("canvas");
-  off.width = w; off.height = h;
-  const octx = off.getContext("2d", { willReadFrequently:true });
-  octx.drawImage(img, 0, 0, w, h);
-
-  const id = octx.getImageData(0,0,w,h);
-  const data = id.data;
-
-  // 2) build binary mask of "white-ish"
-  // Threshold can be tuned. Start with 205.
-  const TH = 205;
-
-  const bin = new Uint8Array(w*h);
-  for (let y=0; y<h; y++){
-    let row = y*w;
-    for (let x=0; x<w; x++){
-      const i = (row + x)*4;
-      const r = data[i], g = data[i+1], b = data[i+2];
-      // luminance
-      const lum = (r*0.2126 + g*0.7152 + b*0.0722);
-      bin[row + x] = (lum >= TH) ? 1 : 0;
+  // build integral
+  for(let y=1;y<=h;y++){
+    let rowsum = 0;
+    for(let x=1;x<=w;x++){
+      rowsum += src[(y-1)*w + (x-1)];
+      integ[y*iw + x] = integ[(y-1)*iw + x] + rowsum;
     }
   }
 
-  // 3) visited map
+  for(let y=0;y<h;y++){
+    const y0 = Math.max(0, y-r), y1 = Math.min(h-1, y+r);
+    for(let x=0;x<w;x++){
+      const x0 = Math.max(0, x-r), x1 = Math.min(w-1, x+r);
+      const A = integ[y0*iw + x0];
+      const B = integ[y0*iw + (x1+1)];
+      const C = integ[(y1+1)*iw + x0];
+      const D = integ[(y1+1)*iw + (x1+1)];
+      const area = (x1-x0+1)*(y1-y0+1);
+      dst[y*w + x] = (D - B - C + A) / area;
+    }
+  }
+  return dst;
+}
+
+// simple morphology on binary: 1 pass dilate then erode (closing)
+function dilate(bin,w,h){
+  const out = new Uint8Array(w*h);
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      const p=y*w+x;
+      const v = bin[p]||bin[p-1]||bin[p+1]||bin[p-w]||bin[p+w]||bin[p-w-1]||bin[p-w+1]||bin[p+w-1]||bin[p+w+1];
+      out[p]=v?1:0;
+    }
+  }
+  return out;
+}
+function erode(bin,w,h){
+  const out = new Uint8Array(w*h);
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      const p=y*w+x;
+      const v = bin[p]&&bin[p-1]&&bin[p+1]&&bin[p-w]&&bin[p+w]&&bin[p-w-1]&&bin[p-w+1]&&bin[p+w-1]&&bin[p+w+1];
+      out[p]=v?1:0;
+    }
+  }
+  return out;
+}
+
+// Connected components on binary
+function connectedComponents(bin,w,h){
   const vis = new Uint8Array(w*h);
-
-  // 4) component scan (flood fill)
-  const comps = [];
   const stack = [];
+  const comps = [];
 
-  const idx = (x,y)=>y*w+x;
+  const idx=(x,y)=>y*w+x;
 
-  // parameters
-  const MIN_AREA = 35;         // noise filter (in pixels at scaled size)
-  const MIN_CIRC = 0.45;       // 1.0 perfect circle
-  // NOTE: mmPerPx is approximate in A1 (we'll calibrate by frame later)
-  const mmPerPx = 200 / 800;   // placeholder
-
-  for (let y=1; y<h-1; y++){
-    for (let x=1; x<w-1; x++){
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
       const p = idx(x,y);
-      if (!bin[p] || vis[p]) continue;
+      if(!bin[p]||vis[p]) continue;
 
-      // start fill
-      let area = 0;
-      let sumX = 0, sumY = 0;
-      let perimeter = 0;
+      let area=0,sumX=0,sumY=0,per=0;
+      stack.length=0;
+      stack.push(p); vis[p]=1;
 
-      stack.length = 0;
-      stack.push(p);
-      vis[p] = 1;
+      while(stack.length){
+        const q=stack.pop();
+        const qy=(q/w)|0;
+        const qx=q-qy*w;
 
-      while (stack.length){
-        const q = stack.pop();
-        const qy = Math.floor(q / w);
-        const qx = q - qy*w;
+        area++; sumX+=qx; sumY+=qy;
 
-        area++;
-        sumX += qx;
-        sumY += qy;
+        const n1=q-1,n2=q+1,n3=q-w,n4=q+w;
+        if(!bin[n1]) per++;
+        if(!bin[n2]) per++;
+        if(!bin[n3]) per++;
+        if(!bin[n4]) per++;
 
-        // perimeter estimate: count edges touching background
-        // 4-neighborhood
-        const n1 = q - 1;
-        const n2 = q + 1;
-        const n3 = q - w;
-        const n4 = q + w;
-
-        if (!bin[n1]) perimeter++;
-        if (!bin[n2]) perimeter++;
-        if (!bin[n3]) perimeter++;
-        if (!bin[n4]) perimeter++;
-
-        // push neighbors if white and not visited
-        if (bin[n1] && !vis[n1]) { vis[n1]=1; stack.push(n1); }
-        if (bin[n2] && !vis[n2]) { vis[n2]=1; stack.push(n2); }
-        if (bin[n3] && !vis[n3]) { vis[n3]=1; stack.push(n3); }
-        if (bin[n4] && !vis[n4]) { vis[n4]=1; stack.push(n4); }
+        if(bin[n1]&&!vis[n1]){vis[n1]=1;stack.push(n1);}
+        if(bin[n2]&&!vis[n2]){vis[n2]=1;stack.push(n2);}
+        if(bin[n3]&&!vis[n3]){vis[n3]=1;stack.push(n3);}
+        if(bin[n4]&&!vis[n4]){vis[n4]=1;stack.push(n4);}
       }
 
-      if (area < MIN_AREA) continue;
+      const cx=sumX/area, cy=sumY/area;
+      comps.push({area,cx,cy,per});
+    }
+  }
+  return comps;
+}
 
-      const cx = sumX / area;
-      const cy = sumY / area;
+function analyze(img){
+  // downscale for speed
+  const maxSide = 1000;
+  const w0=img.naturalWidth, h0=img.naturalHeight;
+  const sc = Math.min(1, maxSide/Math.max(w0,h0));
+  const w=Math.max(1,Math.round(w0*sc));
+  const h=Math.max(1,Math.round(h0*sc));
 
-      // circularity
-      const circ = (perimeter>0) ? (4*Math.PI*area/(perimeter*perimeter)) : 0;
-      if (circ < MIN_CIRC) continue;
+  const off=document.createElement("canvas");
+  off.width=w; off.height=h;
+  const ctx=off.getContext("2d",{willReadFrequently:true});
+  ctx.drawImage(img,0,0,w,h);
+  const id=ctx.getImageData(0,0,w,h);
+  const d=id.data;
 
-      // equivalent diameter (px -> mm)
-      const dPx = 2*Math.sqrt(area/Math.PI);
-      const dMm = dPx * mmPerPx;
+  // grayscale
+  const gray=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
+    gray[i]=0.2126*r+0.7152*g+0.0722*b;
+  }
 
-      if (dMm >= 4){
-        comps.push({cx, cy, dPx, dMm, circ, area});
-      }
+  // --- PARAMETERS (можно крутить) ---
+  const bgRadius = 18;     // радиус для оценки фона (освещение)
+  const thrOffset = 18;    // насколько ярче фона должен быть пиксель
+  const minArea = 18;      // минимальная площадь компоненты (после downscale)
+  const minCirc = 0.28;    // минимальная "круглость"
+  const mmPerPx = 200/800; // пока приблизительно (калибровку сделаем позже)
+  // ----------------------------------
+
+  // background (box blur)
+  const bg = boxBlurGray(gray,w,h,bgRadius);
+
+  // binarize by local contrast: gray > bg + offset
+  let bin=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++){
+    bin[i] = (gray[i] > bg[i] + thrOffset) ? 1 : 0;
+  }
+
+  // close to fill small holes
+  bin = erode(dilate(bin,w,h),w,h);
+
+  // components
+  const comps = connectedComponents(bin,w,h);
+
+  // filter and measure
+  const pins=[];
+  for(const c of comps){
+    if(c.area < minArea) continue;
+    const circ = (c.per>0) ? (4*Math.PI*c.area/(c.per*c.per)) : 0;
+    if(circ < minCirc) continue;
+
+    const dPx = 2*Math.sqrt(c.area/Math.PI);
+    const dMm = dPx * mmPerPx;
+
+    if(dMm >= 4){
+      pins.push({cx:c.cx, cy:c.cy, dPx, dMm, circ, area:c.area});
     }
   }
 
-  return { w, h, comps, scaleToOriginal: 1/scale };
+  return {w,h,sc,pins};
 }
 
 btn.addEventListener("click", async () => {
-  if (btn.disabled) return;
-  btn.disabled = true;
+  if(btn.disabled) return;
+  btn.disabled=true;
   set("Анализ…");
-
   try{
     const img = await fileToImg(input.files[0]);
-    const res = analyzeImage(img);
+    const res = analyze(img);
 
-    // draw original scaled image on main canvas
-    canvas.width = res.w;
-    canvas.height = res.h;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, res.w, res.h);
+    // draw image
+    canvas.width=res.w;
+    canvas.height=res.h;
+    const ctx=canvas.getContext("2d");
+    ctx.drawImage(img,0,0,res.w,res.h);
 
-    // draw circles
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = "#00ff00";
+    ctx.lineWidth=3;
+    ctx.strokeStyle="#00ff00";
 
-    let sum = 0;
-    for (const c of res.comps){
-      const r = Math.max(6, c.dPx/2);
-      drawCircle(ctx, c.cx, c.cy, r);
-      sum += c.dMm;
+    let sum=0;
+    for(const p of res.pins){
+      const r=Math.max(6,p.dPx/2);
+      drawCircle(ctx,p.cx,p.cy,r);
+      sum += p.dMm;
     }
 
-    const n = res.comps.length;
-    const avg = n ? (sum/n).toFixed(1) : "0.0";
-
-    set(`Пинов >4 мм: ${n}\nСредний диаметр: ${avg} мм\n\n(Примечание: мм пока приблизительно. Следующий шаг — автокалибровка по рамке 20×20.)`,
+    const n=res.pins.length;
+    const avg=n?(sum/n).toFixed(1):"0.0";
+    set(`Пинов >4 мм: ${n}\nСредний диаметр: ${avg} мм\n\n(мм пока приблизительно. Следующий шаг — точная калибровка по рамке 20×20.)`,
         n ? "ok" : "bad");
-
   }catch(e){
-    set("Ошибка анализа: " + String(e), "bad");
+    set("Ошибка: "+String(e),"bad");
   }finally{
-    btn.disabled = !hasFile();
+    btn.disabled=!hasFile();
   }
 });
 </script>
