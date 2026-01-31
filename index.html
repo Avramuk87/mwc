@@ -1,273 +1,137 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>MWC — A1</title>
-  <meta name="theme-color" content="#111111" />
-  <style>
-    body { font-family: -apple-system, system-ui, Arial; margin: 16px; }
-    h1 { font-size: 20px; margin: 0 0 8px; }
-    .small { color:#555; font-size: 13px; margin-bottom: 10px; }
-    .card { border:1px solid #ddd; border-radius:12px; padding:12px; margin:10px 0; }
-    button { width:100%; padding:12px; border-radius:10px; border:1px solid #111; background:#111; color:#fff; font-weight:800; }
-    button:disabled { opacity:.5; }
-    input[type=file] { width:100%; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
-    canvas { width:100%; border-radius:12px; border:1px solid #ddd; }
-    .warn { color:#c90; font-weight:800; }
-    .ok { color:#0a7; font-weight:800; }
-    .bad { color:#c00; font-weight:800; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MWC — A1</title>
+<meta name="theme-color" content="#111111">
+<style>
+body{font-family:-apple-system,system-ui,Arial;margin:16px}
+h1{font-size:20px}
+.small{font-size:13px;color:#555}
+.card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
+button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:800}
+button:disabled{opacity:.5}
+input{width:100%;margin:6px 0}
+pre{white-space:pre-wrap}
+canvas{width:100%;border:1px solid #ddd;border-radius:12px}
+.ok{color:#0a7;font-weight:700}
+.warn{color:#c90;font-weight:700}
+.bad{color:#c00;font-weight:700}
+</style>
 </head>
+
 <body>
-  <h1>MWC — A1 (подсчёт пинов >4 мм)</h1>
-  <div class="small">
-    Требования к фото: строго сверху, рамка <b>20×20 см</b> полностью в кадре, меньше бликов.
-  </div>
+<h1>MWC — A1 (подсчёт пинов &gt;4 мм)</h1>
+<div class="small">
+Фото берётся <b>из галереи</b>. Рамка 20×20 см должна быть полностью в кадре.
+</div>
 
-  <div class="card">
-    <label><b>Фото (1 шт)</b></label><br/>
-    <input id="img1" type="file" accept="image/*" capture="environment">
-    <div class="small">После выбора фото нажми «АНАЛИЗ».</div>
-    <button id="btn" disabled>АНАЛИЗ</button>
-  </div>
+<div class="card">
+<b>Выбери фото</b>
+<input id="img" type="file" accept="image/*">
+<button id="btn" disabled>АНАЛИЗ</button>
+</div>
 
-  <div class="card">
-    <div id="status" class="mono">Загрузи фото.</div>
-  </div>
+<div class="card">
+<pre id="out">Загрузи фото.</pre>
+</div>
 
-  <div class="card">
-    <canvas id="cv"></canvas>
-    <div class="small">На картинке зелёным обводятся найденные пины &gt;4 мм.</div>
-  </div>
+<div class="card">
+<canvas id="cv"></canvas>
+<div class="small">Найденные пины &gt;4 мм обведены зелёным</div>
+</div>
 
-  <!-- OpenCV.js -->
-  <script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"></script>
+<script async src="https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js"></script>
+<script>
+const input=document.getElementById("img");
+const btn=document.getElementById("btn");
+const out=document.getElementById("out");
+const canvas=document.getElementById("cv");
 
-  <script>
-    const input = document.getElementById("img1");
-    const btn = document.getElementById("btn");
-    const statusEl = document.getElementById("status");
-    const canvas = document.getElementById("cv");
+function cvReady(){return typeof cv!=="undefined"&&cv.Mat}
+function set(t,c=""){out.className=c;out.textContent=t}
 
-    function cvReady() { return (typeof cv !== "undefined" && cv.Mat); }
+const t=setInterval(()=>{
+  btn.disabled=!(input.files&&input.files[0]&&cvReady());
+  if(input.files&&input.files[0]&&!cvReady())set("Жду загрузки OpenCV…");
+  if(cvReady())clearInterval(t);
+},300);
 
-    function setStatus(text, cls="") {
-      statusEl.className = "mono " + cls;
-      statusEl.textContent = text;
-    }
+input.onchange=()=>set("Фото выбрано. Нажми «АНАЛИЗ»");
 
-    // enable when both image selected and opencv loaded
-    const tmr = setInterval(() => {
-      btn.disabled = !(input.files && input.files[0] && cvReady());
-      if (input.files && input.files[0] && !cvReady()) setStatus("Жду загрузки OpenCV… (5–20 сек)");
-      if (cvReady()) clearInterval(tmr);
-    }, 350);
+function fileToImg(f){
+  return new Promise(r=>{
+    const i=new Image();
+    i.onload=()=>r(i);
+    i.src=URL.createObjectURL(f);
+  });
+}
 
-    input.addEventListener("change", () => {
-      btn.disabled = !(input.files && input.files[0] && cvReady());
-      if (input.files && input.files[0]) setStatus("Фото загружено. Нажми «АНАЛИЗ».");
-      else setStatus("Загрузи фото.");
-    });
+function matFromImg(i){
+  const c=document.createElement("canvas");
+  c.width=i.naturalWidth;
+  c.height=i.naturalHeight;
+  c.getContext("2d").drawImage(i,0,0);
+  return cv.matFromImageData(c.getContext("2d").getImageData(0,0,c.width,c.height));
+}
 
-    function fileToImage(file) {
-      return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = reject;
-        img.src = URL.createObjectURL(file);
-      });
-    }
+btn.onclick=async()=>{
+  btn.disabled=true;
+  set("Анализ...");
+  try{
+    const img=await fileToImg(input.files[0]);
+    const mat=matFromImg(img);
 
-    function imageToMat(img) {
-      const c = document.createElement("canvas");
-      c.width = img.naturalWidth;
-      c.height = img.naturalHeight;
-      const ctx = c.getContext("2d");
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, c.width, c.height);
-      return cv.matFromImageData(data); // RGBA
-    }
+    const gray=new cv.Mat();
+    cv.cvtColor(mat,gray,cv.COLOR_RGBA2GRAY);
+    cv.GaussianBlur(gray,gray,new cv.Size(5,5),0);
 
-    function drawMatToCanvas(mat) {
-      // mat is RGBA
-      canvas.width = mat.cols;
-      canvas.height = mat.rows;
-      const imgData = new ImageData(new Uint8ClampedArray(mat.data), mat.cols, mat.rows);
-      const ctx = canvas.getContext("2d");
-      ctx.putImageData(imgData, 0, 0);
-    }
+    const bin=new cv.Mat();
+    cv.threshold(gray,bin,200,255,cv.THRESH_BINARY);
 
-    // Detect frame -> warp to square 800x800 and compute mmPerPx
-    function warpToSquare(matRGBA) {
-      const src = matRGBA.clone();
-      const gray = new cv.Mat();
-      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
+    const k=cv.getStructuringElement(cv.MORPH_ELLIPSE,new cv.Size(5,5));
+    cv.morphologyEx(bin,bin,cv.MORPH_OPEN,k);
+    cv.morphologyEx(bin,bin,cv.MORPH_CLOSE,k);
 
-      const edges = new cv.Mat();
-      cv.Canny(gray, edges, 60, 180);
+    const cont=new cv.MatVector(),hier=new cv.Mat();
+    cv.findContours(bin,cont,hier,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE);
 
-      const contours = new cv.MatVector();
-      const hierarchy = new cv.Mat();
-      cv.findContours(edges, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+    const scale=200/800; // мм/пиксель (приближённо)
+    let count=0,sum=0;
 
-      let best = null;
-      let bestArea = 0;
+    const outMat=mat.clone();
 
-      for (let i=0; i<contours.size(); i++) {
-        const cnt = contours.get(i);
-        const peri = cv.arcLength(cnt, true);
-        const approx = new cv.Mat();
-        cv.approxPolyDP(cnt, approx, 0.02 * peri, true);
-
-        if (approx.rows === 4) {
-          const area = cv.contourArea(approx);
-          if (area > bestArea) {
-            if (best) best.delete();
-            bestArea = area;
-            best = approx;
-          } else {
-            approx.delete();
-          }
-        } else {
-          approx.delete();
-        }
-        cnt.delete();
+    for(let i=0;i<cont.size();i++){
+      const c=cont.get(i);
+      const area=cv.contourArea(c);
+      if(area<30){c.delete();continue;}
+      const dpx=2*Math.sqrt(area/Math.PI);
+      const dmm=dpx*scale;
+      if(dmm>=4){
+        const m=cv.moments(c);
+        const x=m.m10/m.m00,y=m.m01/m.m00;
+        cv.circle(outMat,new cv.Point(x,y),dpx/2,new cv.Scalar(0,255,0,255),2);
+        count++;sum+=dmm;
       }
-
-      contours.delete(); hierarchy.delete();
-      edges.delete(); gray.delete(); src.delete();
-
-      const dstSize = 800;
-      const warped = new cv.Mat();
-
-      // fallback if frame not found
-      if (!best || bestArea < 5000) {
-        cv.resize(matRGBA, warped, new cv.Size(dstSize, dstSize), 0, 0, cv.INTER_AREA);
-        if (best) best.delete();
-        return { warped, mmPerPx: 200/dstSize, frameFound:false };
-      }
-
-      // order points (tl,tr,br,bl)
-      const pts = [];
-      for (let r=0; r<4; r++) pts.push({x: best.intPtr(r,0)[0], y: best.intPtr(r,0)[1]});
-      best.delete();
-
-      pts.sort((a,b)=>a.y-b.y);
-      const top = pts.slice(0,2).sort((a,b)=>a.x-b.x);
-      const bot = pts.slice(2,4).sort((a,b)=>a.x-b.x);
-      const tl = top[0], tr = top[1], bl = bot[0], br = bot[1];
-
-      const srcTri = cv.matFromArray(4,1,cv.CV_32FC2,[tl.x,tl.y, tr.x,tr.y, br.x,br.y, bl.x,bl.y]);
-      const dstTri = cv.matFromArray(4,1,cv.CV_32FC2,[0,0, dstSize,0, dstSize,dstSize, 0,dstSize]);
-      const M = cv.getPerspectiveTransform(srcTri, dstTri);
-
-      cv.warpPerspective(matRGBA, warped, M, new cv.Size(dstSize,dstSize), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
-
-      srcTri.delete(); dstTri.delete(); M.delete();
-
-      return { warped, mmPerPx: 200/dstSize, frameFound:true };
+      c.delete();
     }
 
-    function detectPins(matRGBA) {
-      const { warped, mmPerPx, frameFound } = warpToSquare(matRGBA);
+    const avg=count?(sum/count).toFixed(1):0;
+    set(`Пинов >4 мм: ${count}\nСредний диаметр: ${avg} мм`,count?"ok":"bad");
 
-      // HSV threshold for "white-ish"
-      const rgb = new cv.Mat();
-      cv.cvtColor(warped, rgb, cv.COLOR_RGBA2RGB);
-      const hsv = new cv.Mat();
-      cv.cvtColor(rgb, hsv, cv.COLOR_RGB2HSV);
+    canvas.width=outMat.cols;
+    canvas.height=outMat.rows;
+    canvas.getContext("2d").putImageData(
+      new ImageData(new Uint8ClampedArray(outMat.data),outMat.cols,outMat.rows),0,0
+    );
 
-      const low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 0, 150, 0]);
-      const high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [180, 80, 255, 0]);
-      const mask = new cv.Mat();
-      cv.inRange(hsv, low, high, mask);
-
-      // cleanup
-      const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));
-      cv.morphologyEx(mask, mask, cv.MORPH_OPEN, k);
-      cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, k);
-
-      const contours = new cv.MatVector();
-      const hierarchy = new cv.Mat();
-      cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-      const pins = [];
-      for (let i=0; i<contours.size(); i++) {
-        const cnt = contours.get(i);
-        const area = cv.contourArea(cnt);
-        if (area < 25) { cnt.delete(); continue; } // small noise
-
-        const peri = cv.arcLength(cnt, true);
-        if (peri <= 0) { cnt.delete(); continue; }
-
-        const circ = 4 * Math.PI * area / (peri * peri); // 1.0 = circle
-        if (circ < 0.55) { cnt.delete(); continue; } // reject strings / mycelium
-
-        // equivalent diameter
-        const diamPx = 2 * Math.sqrt(area / Math.PI);
-        const diamMm = diamPx * mmPerPx;
-
-        if (diamMm >= 4) {
-          const m = cv.moments(cnt);
-          const cx = (m.m00 !== 0) ? (m.m10 / m.m00) : 0;
-          const cy = (m.m00 !== 0) ? (m.m01 / m.m00) : 0;
-          pins.push({x: cx, y: cy, dMm: diamMm, dPx: diamPx});
-        }
-        cnt.delete();
-      }
-
-      // draw result
-      const out = warped.clone();
-      for (const p of pins) {
-        const center = new cv.Point(p.x, p.y);
-        const radius = Math.max(6, p.dPx/2);
-        cv.circle(out, center, radius, new cv.Scalar(0, 255, 0, 255), 2);
-      }
-
-      // cleanup
-      contours.delete(); hierarchy.delete();
-      k.delete(); low.delete(); high.delete();
-      mask.delete(); hsv.delete(); rgb.delete(); warped.delete();
-
-      return { pins, outMat: out, frameFound };
-    }
-
-    btn.addEventListener("click", async () => {
-      if (!(input.files && input.files[0])) return;
-      if (!cvReady()) { setStatus("OpenCV ещё загружается…", "warn"); return; }
-
-      btn.disabled = true;
-      setStatus("Считаю пины >4 мм…", "");
-
-      try {
-        const img = await fileToImage(input.files[0]);
-        const mat = imageToMat(img);
-
-        const { pins, outMat, frameFound } = detectPins(mat);
-        mat.delete();
-
-        drawMatToCanvas(outMat);
-        outMat.delete();
-
-        const n = pins.length;
-        const avg = n ? (pins.reduce((s,p)=>s+p.dMm,0)/n) : 0;
-
-        let msg = `Найдено пинов >4 мм: ${n}\nСредний диаметр: ${avg.toFixed(1)} мм\n`;
-        if (!frameFound) {
-          msg += `\n⚠️ Рамка 20×20 найдена неуверенно. Снимай строго сверху и чтобы рамка была полностью в кадре.`;
-          setStatus(msg, "warn");
-        } else {
-          setStatus(msg, n ? "ok" : "bad");
-        }
-      } catch (e) {
-        setStatus("Ошибка анализа: " + String(e), "bad");
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  </script>
+    mat.delete();gray.delete();bin.delete();k.delete();cont.delete();hier.delete();outMat.delete();
+  }catch(e){
+    set("Ошибка анализа","bad");
+  }
+  btn.disabled=false;
+};
+</script>
 </body>
 </html>
