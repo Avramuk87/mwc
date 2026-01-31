@@ -18,22 +18,20 @@
   .ok{color:#0a7;font-weight:700}
   .warn{color:#c90;font-weight:700}
   .bad{color:#c00;font-weight:700}
-  .ghost{background:#fff;color:#111}
 </style>
 </head>
 
 <body>
-<h1>MWC — A1 (пины &gt;4 мм)</h1>
+<h1>MWC — A1 (пины &gt;4 мм) — без OpenCV</h1>
 <div class="small">
-Открыто из Safari. Если OpenCV не готов — нажми «Перезагрузить OpenCV».
+Фото из <b>галереи</b>. Алгоритм: порог по «белому» + поиск пятен (connected components) + фильтр по форме.
 </div>
 
 <div class="card">
   <b>Выбери фото</b>
   <input id="img" type="file" accept="image/*">
   <button id="btn" disabled>АНАЛИЗ</button>
-  <button id="reload" class="ghost" style="margin-top:8px; display:none;">Перезагрузить OpenCV</button>
-  <div class="small" id="hint">Загрузка OpenCV…</div>
+  <div class="small" id="hint">Выбери фото — кнопка активируется.</div>
 </div>
 
 <div class="card"><pre id="out">Загрузи фото.</pre></div>
@@ -48,92 +46,15 @@ const input = document.getElementById("img");
 const btn   = document.getElementById("btn");
 const out   = document.getElementById("out");
 const hint  = document.getElementById("hint");
-const reloadBtn = document.getElementById("reload");
 const canvas= document.getElementById("cv");
-
-let cvIsReady = false;
 
 function set(t, cls=""){ out.className = cls; out.textContent = t; }
 function hasFile(){ return input.files && input.files[0]; }
-
 function updateUI(){
-  btn.disabled = !(cvIsReady && hasFile());
-  if (!cvIsReady) hint.textContent = "Жду загрузки OpenCV… (иногда 30–90 сек в первый раз)";
-  else if (!hasFile()) hint.textContent = "OpenCV готов. Выбери фото.";
-  else hint.textContent = "Готово. Нажми «АНАЛИЗ».";
+  btn.disabled = !hasFile();
+  hint.textContent = hasFile() ? "Готово. Нажми «АНАЛИЗ»." : "Выбери фото — кнопка активируется.";
 }
-
-// --- OpenCV loader with fallback CDN ---
-function loadScript(src){
-  return new Promise((resolve, reject) => {
-    const s = document.createElement("script");
-    s.async = true;
-    s.src = src;
-    s.onload = () => resolve();
-    s.onerror = () => reject(new Error("load failed: " + src));
-    document.head.appendChild(s);
-  });
-}
-
-async function loadOpenCV(){
-  cvIsReady = false;
-  updateUI();
-  reloadBtn.style.display = "none";
-
-  // cleanup previous script tags (optional)
-  [...document.querySelectorAll("script[data-opencv]")].forEach(x => x.remove());
-
-  const v = Date.now();
-  const sources = [
-    `https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js?v=${v}`,
-    `https://unpkg.com/opencv.js@1.2.1/opencv.js?v=${v}`
-  ];
-
-  let loaded = false;
-  for (const src of sources){
-    try{
-      const s = document.createElement("script");
-      s.async = true;
-      s.src = src;
-      s.setAttribute("data-opencv","1");
-      document.head.appendChild(s);
-
-      await new Promise((resolve, reject) => {
-        s.onload = resolve;
-        s.onerror = reject;
-      });
-
-      loaded = true;
-      break;
-    }catch(e){
-      // try next source
-    }
-  }
-
-  if (!loaded){
-    hint.textContent = "Не удалось загрузить OpenCV. Проверь интернет/блокировщик и нажми «Перезагрузить OpenCV».";
-    reloadBtn.style.display = "block";
-    return;
-  }
-
-  // wait runtime init
-  if (typeof cv === "undefined"){
-    hint.textContent = "OpenCV скрипт загрузился, но cv не появился. Нажми «Перезагрузить OpenCV».";
-    reloadBtn.style.display = "block";
-    return;
-  }
-
-  cv["onRuntimeInitialized"] = () => {
-    cvIsReady = true;
-    reloadBtn.style.display = "none";
-    updateUI();
-  };
-
-  // if still not ready after 25s -> show reload
-  setTimeout(() => { if (!cvIsReady) reloadBtn.style.display = "block"; }, 25000);
-}
-
-reloadBtn.addEventListener("click", () => loadOpenCV());
+updateUI();
 
 input.addEventListener("change", () => {
   if (hasFile()) set("Фото выбрано. Нажми «АНАЛИЗ».");
@@ -141,7 +62,6 @@ input.addEventListener("change", () => {
   updateUI();
 });
 
-// --- helpers ---
 function fileToImg(f){
   return new Promise((resolve, reject) => {
     const i = new Image();
@@ -151,90 +71,162 @@ function fileToImg(f){
   });
 }
 
-function matFromImg(i){
-  const c = document.createElement("canvas");
-  c.width = i.naturalWidth;
-  c.height = i.naturalHeight;
-  c.getContext("2d").drawImage(i, 0, 0);
-  const ctx = c.getContext("2d");
-  const id = ctx.getImageData(0,0,c.width,c.height);
-  return cv.matFromImageData(id);
+function drawCircle(ctx, x, y, r){
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.stroke();
 }
 
-function drawRGBA(matRGBA){
-  canvas.width = matRGBA.cols;
-  canvas.height = matRGBA.rows;
-  const imgData = new ImageData(new Uint8ClampedArray(matRGBA.data), matRGBA.cols, matRGBA.rows);
-  canvas.getContext("2d").putImageData(imgData, 0, 0);
+// Connected components on binary image
+function analyzeImage(img){
+  // 1) draw & downscale for speed
+  const maxSide = 900; // iPhone-friendly
+  const w0 = img.naturalWidth, h0 = img.naturalHeight;
+  const scale = Math.min(1, maxSide / Math.max(w0, h0));
+  const w = Math.max(1, Math.round(w0 * scale));
+  const h = Math.max(1, Math.round(h0 * scale));
+
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+  const octx = off.getContext("2d", { willReadFrequently:true });
+  octx.drawImage(img, 0, 0, w, h);
+
+  const id = octx.getImageData(0,0,w,h);
+  const data = id.data;
+
+  // 2) build binary mask of "white-ish"
+  // Threshold can be tuned. Start with 205.
+  const TH = 205;
+
+  const bin = new Uint8Array(w*h);
+  for (let y=0; y<h; y++){
+    let row = y*w;
+    for (let x=0; x<w; x++){
+      const i = (row + x)*4;
+      const r = data[i], g = data[i+1], b = data[i+2];
+      // luminance
+      const lum = (r*0.2126 + g*0.7152 + b*0.0722);
+      bin[row + x] = (lum >= TH) ? 1 : 0;
+    }
+  }
+
+  // 3) visited map
+  const vis = new Uint8Array(w*h);
+
+  // 4) component scan (flood fill)
+  const comps = [];
+  const stack = [];
+
+  const idx = (x,y)=>y*w+x;
+
+  // parameters
+  const MIN_AREA = 35;         // noise filter (in pixels at scaled size)
+  const MIN_CIRC = 0.45;       // 1.0 perfect circle
+  // NOTE: mmPerPx is approximate in A1 (we'll calibrate by frame later)
+  const mmPerPx = 200 / 800;   // placeholder
+
+  for (let y=1; y<h-1; y++){
+    for (let x=1; x<w-1; x++){
+      const p = idx(x,y);
+      if (!bin[p] || vis[p]) continue;
+
+      // start fill
+      let area = 0;
+      let sumX = 0, sumY = 0;
+      let perimeter = 0;
+
+      stack.length = 0;
+      stack.push(p);
+      vis[p] = 1;
+
+      while (stack.length){
+        const q = stack.pop();
+        const qy = Math.floor(q / w);
+        const qx = q - qy*w;
+
+        area++;
+        sumX += qx;
+        sumY += qy;
+
+        // perimeter estimate: count edges touching background
+        // 4-neighborhood
+        const n1 = q - 1;
+        const n2 = q + 1;
+        const n3 = q - w;
+        const n4 = q + w;
+
+        if (!bin[n1]) perimeter++;
+        if (!bin[n2]) perimeter++;
+        if (!bin[n3]) perimeter++;
+        if (!bin[n4]) perimeter++;
+
+        // push neighbors if white and not visited
+        if (bin[n1] && !vis[n1]) { vis[n1]=1; stack.push(n1); }
+        if (bin[n2] && !vis[n2]) { vis[n2]=1; stack.push(n2); }
+        if (bin[n3] && !vis[n3]) { vis[n3]=1; stack.push(n3); }
+        if (bin[n4] && !vis[n4]) { vis[n4]=1; stack.push(n4); }
+      }
+
+      if (area < MIN_AREA) continue;
+
+      const cx = sumX / area;
+      const cy = sumY / area;
+
+      // circularity
+      const circ = (perimeter>0) ? (4*Math.PI*area/(perimeter*perimeter)) : 0;
+      if (circ < MIN_CIRC) continue;
+
+      // equivalent diameter (px -> mm)
+      const dPx = 2*Math.sqrt(area/Math.PI);
+      const dMm = dPx * mmPerPx;
+
+      if (dMm >= 4){
+        comps.push({cx, cy, dPx, dMm, circ, area});
+      }
+    }
+  }
+
+  return { w, h, comps, scaleToOriginal: 1/scale };
 }
 
-// --- analysis ---
 btn.addEventListener("click", async () => {
   if (btn.disabled) return;
   btn.disabled = true;
   set("Анализ…");
 
-  try {
+  try{
     const img = await fileToImg(input.files[0]);
-    const mat = matFromImg(img);
+    const res = analyzeImage(img);
 
-    const gray = new cv.Mat();
-    cv.cvtColor(mat, gray, cv.COLOR_RGBA2GRAY);
-    cv.GaussianBlur(gray, gray, new cv.Size(5,5), 0);
+    // draw original scaled image on main canvas
+    canvas.width = res.w;
+    canvas.height = res.h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, res.w, res.h);
 
-    const bin = new cv.Mat();
-    cv.threshold(gray, bin, 200, 255, cv.THRESH_BINARY);
+    // draw circles
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#00ff00";
 
-    const k = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5,5));
-    cv.morphologyEx(bin, bin, cv.MORPH_OPEN, k);
-    cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, k);
-
-    const cont = new cv.MatVector();
-    const hier = new cv.Mat();
-    cv.findContours(bin, cont, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-    // A1: пока мм приблизительно
-    const mmPerPx = 200/800;
-
-    let count = 0, sum = 0;
-    const outMat = mat.clone();
-
-    for (let i=0; i<cont.size(); i++){
-      const c = cont.get(i);
-      const area = cv.contourArea(c);
-      if (area < 30) { c.delete(); continue; }
-
-      const peri = cv.arcLength(c, true);
-      const circ = (peri>0) ? (4*Math.PI*area/(peri*peri)) : 0;
-      if (circ < 0.55) { c.delete(); continue; }
-
-      const dpx = 2 * Math.sqrt(area / Math.PI);
-      const dmm = dpx * mmPerPx;
-
-      if (dmm >= 4){
-        const m = cv.moments(c);
-        const x = m.m10 / m.m00;
-        const y = m.m01 / m.m00;
-        cv.circle(outMat, new cv.Point(x,y), Math.max(6, dpx/2), new cv.Scalar(0,255,0,255), 2);
-        count++; sum += dmm;
-      }
-      c.delete();
+    let sum = 0;
+    for (const c of res.comps){
+      const r = Math.max(6, c.dPx/2);
+      drawCircle(ctx, c.cx, c.cy, r);
+      sum += c.dMm;
     }
 
-    const avg = count ? (sum/count).toFixed(1) : "0.0";
-    set(`Пинов >4 мм: ${count}\nСредний диаметр: ${avg} мм`, count ? "ok" : "bad");
-    drawRGBA(outMat);
+    const n = res.comps.length;
+    const avg = n ? (sum/n).toFixed(1) : "0.0";
 
-    mat.delete(); gray.delete(); bin.delete(); k.delete(); cont.delete(); hier.delete(); outMat.delete();
-  } catch (e) {
+    set(`Пинов >4 мм: ${n}\nСредний диаметр: ${avg} мм\n\n(Примечание: мм пока приблизительно. Следующий шаг — автокалибровка по рамке 20×20.)`,
+        n ? "ok" : "bad");
+
+  }catch(e){
     set("Ошибка анализа: " + String(e), "bad");
-  } finally {
-    updateUI();
+  }finally{
+    btn.disabled = !hasFile();
   }
 });
-
-updateUI();
-loadOpenCV();
 </script>
 </body>
 </html>
