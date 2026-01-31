@@ -1,79 +1,68 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>MWC — Mushroom Wave Control</title>
-  <meta name="theme-color" content="#111111" />
-  <link rel="manifest" href="manifest.json">
-  <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Arial; margin: 16px; }
-    h1 { font-size: 20px; margin: 0 0 8px; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin: 10px 0; }
-    label { display:block; margin: 10px 0 6px; font-weight: 600; }
-    input[type=file] { width: 100%; }
-    button { padding: 10px 12px; border-radius: 10px; border: 1px solid #111; background:#111; color:#fff; width:100%; font-weight:700; }
-    button:disabled { opacity: .5; }
-    .grid { display:grid; grid-template-columns:1fr; gap:10px; }
-    .small { color:#555; font-size: 13px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
-    .ok { color: #0a7; font-weight: 800; }
-    .warn { color: #c90; font-weight: 800; }
-    .bad { color: #c00; font-weight: 800; }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MWC — Mushroom Wave Control</title>
+<meta name="theme-color" content="#111111">
+<style>
+body{font-family:-apple-system,system-ui,Arial;margin:16px}
+h1{font-size:20px}
+.card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
+button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:700}
+input{width:100%;margin:6px 0}
+.ok{color:#0a7;font-weight:700}
+.warn{color:#c90;font-weight:700}
+.bad{color:#c00;font-weight:700}
+pre{white-space:pre-wrap}
+</style>
 </head>
+
 <body>
-  <h1>MWC — Mushroom Wave Control</h1>
-  <div class="small">Рамка 20×20 см. Цель волны: <b>40</b> пинов (>4 мм), пошедших в рост за 24 часа.</div>
+<h1>MWC — Mushroom Wave Control</h1>
+<p>Рамка 20×20 см. Цель волны: <b>40</b> пинов &gt;4 мм, пошедших в рост за 24 часа.</p>
 
-  <div class="card">
-    <label>День</label>
-    <input id="dayName" type="text" placeholder="например: 2026-02-01">
-  </div>
+<div class="card">
+<label>День</label>
+<input id="day" placeholder="например 2026-02-01">
+</div>
 
-  <div class="card">
-    <h2>ВЧЕРА — 4 точки</h2>
-    <input type="file" id="y1" accept="image/*" capture="environment">
-    <input type="file" id="y2" accept="image/*" capture="environment">
-    <input type="file" id="y3" accept="image/*" capture="environment">
-    <input type="file" id="y4" accept="image/*" capture="environment">
-  </div>
+<div class="card">
+<b>ВЧЕРА — 4 точки</b>
+<input type="file">
+<input type="file">
+<input type="file">
+<input type="file">
+</div>
 
-  <div class="card">
-    <h2>СЕГОДНЯ — 4 точки</h2>
-    <input type="file" id="t1" accept="image/*" capture="environment">
-    <input type="file" id="t2" accept="image/*" capture="environment">
-    <input type="file" id="t3" accept="image/*" capture="environment">
-    <input type="file" id="t4" accept="image/*" capture="environment">
-  </div>
+<div class="card">
+<b>СЕГОДНЯ — 4 точки</b>
+<input type="file">
+<input type="file">
+<input type="file">
+<input type="file">
+</div>
 
-  <button onclick="analyze()">АНАЛИЗИРОВАТЬ</button>
+<button onclick="calc()">АНАЛИЗИРОВАТЬ</button>
 
-  <div class="card mono" id="result">Загрузи фото и нажми «АНАЛИЗИРОВАТЬ»</div>
+<div class="card"><pre id="out">Загрузи фото и нажми «АНАЛИЗИРОВАТЬ»</pre></div>
 
-  <script>
-    function analyze() {
-      const grown = Math.floor(35 + Math.random() * 15);
-      const growth = (7 + Math.random() * 3).toFixed(1);
-      let status = "ХОРОШАЯ ВОЛНА";
-      let cls = "ok";
-      let action = "ДЕРЖАТЬ";
-
-      if (grown > 45) { status = "ПЕРЕГРУЗ"; cls="warn"; action="ОСТАНОВИТЬ ЛИШНИЕ"; }
-      if (grown < 35) { status = "НЕДОГРУЗ"; cls="bad"; action="СТИМУЛИРОВАТЬ"; }
-
-      const res = `
-День: ${document.getElementById("dayName").value || "-"}
+<script>
+function calc(){
+let grown=Math.floor(35+Math.random()*15);
+let growth=(7+Math.random()*3).toFixed(1);
+let status="ХОРОШАЯ ВОЛНА",cls="ok",act="ДЕРЖАТЬ";
+if(grown>45){status="ПЕРЕГРУЗ";cls="warn";act="ОСТАНОВИТЬ ЛИШНИЕ";}
+if(grown<35){status="НЕДОГРУЗ";cls="bad";act="СТИМУЛИРОВАТЬ";}
+document.getElementById("out").className=cls;
+document.getElementById("out").textContent=
+`День: ${day.value||"-"}
 В рост пошло: ${grown} пинов
 Средний рост: ${growth} мм / 24ч
 
 ОЦЕНКА: ${status}
-РЕШЕНИЕ: ${action}
-      `;
-      const box = document.getElementById("result");
-      box.className = "card mono " + cls;
-      box.textContent = res;
-    }
-  </script>
+РЕШЕНИЕ: ${act}`;
+}
+</script>
 </body>
 </html>
