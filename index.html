@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.9 FULL (≥min мм) DoG + Calib + Edit</title>
+<title>MWC — A2.0 SIMPLE</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -14,59 +14,37 @@
   button.secondary{background:#fff;color:#111}
   button:disabled{opacity:.45}
   input[type="file"]{width:100%;margin:8px 0}
-  input[type="range"]{width:100%}
   pre{white-space:pre-wrap;margin:0}
   canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:none}
   .ok{color:#0a7;font-weight:700}
   .bad{color:#c00;font-weight:700}
   .warn{color:#c90;font-weight:700}
   .row{display:flex;gap:10px;flex-wrap:wrap}
-  .row > button{flex:1;min-width:160px}
+  .row > button{flex:1;min-width:150px}
   .kv{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#333}
 </style>
 </head>
 
 <body>
-<h1>MWC — A1.9 FULL — рамка 20×20 см + калибровка размера</h1>
+<h1>MWC — A2.0 SIMPLE (авто-рамка, считаем ≥4 мм)</h1>
 <div class="small">
-Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>.<br>
-<b>Жесты:</b> Tap=toggle • DoubleTap=add • Hold+Drag=move<br>
-<b>Важно:</b> Если меняешь Frame size или Calib → нажми <b>Анализ</b> заново (масштаб детектора меняется).
+Рамка 20×20 см (200 мм). Авто-поиск рамки → warp 800×800.<br>
+<b>Жесты:</b> Tap=toggle • DoubleTap=add • Hold+Drag=move
 </div>
 
 <div class="card">
   <b>Фото</b>
   <input id="img" type="file" accept="image/*">
-  <div class="row">
-    <button id="pick" class="secondary" disabled>Выбрать 4 угла</button>
-    <button id="run" disabled>Анализ</button>
-  </div>
-
-  <label class="small"><b>Frame size</b> (мм) — сторона рамки, по тем углам которые ты тыкаешь</label>
-  <input id="framemm" type="range" min="150" max="230" value="200" step="1">
-  <div class="small kv" id="framemmVal">200 мм</div>
-
-  <label class="small"><b>Size calibration</b> (×) — поправка диаметра (обычно 1.05–1.25)</label>
-  <input id="calib" type="range" min="0.85" max="1.35" value="1.15" step="0.01">
-  <div class="small kv" id="calibVal">×1.15</div>
-
-  <label class="small"><b>Sensitivity</b> (меньше = строже, больше = больше находок)</label>
-  <input id="sens" type="range" min="1" max="20" value="8">
-  <div class="small kv" id="sensVal">8</div>
-
-  <label class="small"><b>Min size</b> (мм) — нижний порог для подсчёта</label>
-  <input id="minmm" type="range" min="3" max="12" value="4" step="0.5">
-  <div class="small kv" id="minmmVal">4.0</div>
-
+  <button id="run" disabled>Анализ</button>
   <div class="small" id="hint">Выбери фото.</div>
 </div>
 
 <div class="card"><pre id="out">Загрузи фото.</pre></div>
 
 <div class="card">
-  <b>Исходное фото (выбор углов)</b>
+  <b>Исходное фото (авто-рамка)</b>
   <canvas id="src"></canvas>
-  <div class="small">Порядок: 1) ЛВ  2) ПВ  3) ПН  4) ЛН</div>
+  <div class="small">Зелёным — найденная рамка.</div>
 </div>
 
 <div class="card">
@@ -89,8 +67,7 @@
 <script>
 // ----------------- DOM -----------------
 const input = document.getElementById("img");
-const pickBtn = document.getElementById("pick");
-const runBtn  = document.getElementById("run");
+const runBtn = document.getElementById("run");
 const hint = document.getElementById("hint");
 const out  = document.getElementById("out");
 
@@ -98,18 +75,6 @@ const cSrc = document.getElementById("src");
 const cRect= document.getElementById("rect");
 const srcCtx = cSrc.getContext("2d", { willReadFrequently:true });
 const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
-
-const framemm = document.getElementById("framemm");
-const framemmVal = document.getElementById("framemmVal");
-
-const calib = document.getElementById("calib");
-const calibVal = document.getElementById("calibVal");
-
-const sens = document.getElementById("sens");
-const sensVal = document.getElementById("sensVal");
-
-const minmm = document.getElementById("minmm");
-const minmmVal = document.getElementById("minmmVal");
 
 const liveEl = document.getElementById("live");
 
@@ -121,20 +86,22 @@ const savePngBtn = document.getElementById("savepng");
 
 // ----------------- Constants -----------------
 const RECT = 800;
-const DMAX_DETECT_MM = 60.0; // потолок детектора, не "потолок подсчёта"
+const FRAME_MM = 200;                  // 20 cm
+const mmPerPx = FRAME_MM / RECT;       // 0.25
+const CALIB = 1.15;                    // можно потом вынести в настройку, но сейчас фикс
+const DMIN_MM = 4.0;                   // фикс (как ты просил)
+const DMAX_DETECT_MM = 60.0;           // потолок детектора
 const PICK_R = 28;
 
 // ----------------- State -----------------
 let imgObj = null;
-let picking = false;
-let corners = [];
 
 let points = [];        // auto + manual + excluded
-let basePoints = [];    // чистый DoG
+let basePoints = [];
 let history = [];
 let lastWarped = null;
 
-// touch state
+// iOS touch state
 let lastTapTime = 0;
 let lastTapPos = null;
 let doubleHandled = false;
@@ -143,43 +110,29 @@ let dragging = false;
 let dragIdx = -1;
 let pressTimer = null;
 
-let scaleDirty = false; // если меняли frame/calib — просим rerun
+// corners (авто найденные) in source-canvas coords: [LT, RT, RB, LB]
+let autoCorners = null;
 
-// ----------------- Functions -----------------
-function FRAME_MM(){ return Number(framemm.value); }
-function CALIB(){ return Number(calib.value); }
-function DMIN_MM(){ return Number(minmm.value); }
-function mmPerPx(){ return FRAME_MM() / RECT; }
-
-function setOut(t, cls=""){
-  out.className = cls;
-  out.textContent = t;
-}
+function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
 
 function updateUI(){
-  pickBtn.disabled = !imgObj;
-  runBtn.disabled = !(imgObj && corners.length === 4);
-
+  runBtn.disabled = !imgObj;
   undoBtn.disabled = history.length === 0;
   clearManualBtn.disabled = points.filter(p=>p.src==="manual").length === 0;
   resetEditsBtn.disabled = basePoints.length === 0;
   exportBtn.disabled = points.length === 0;
   savePngBtn.disabled = !lastWarped;
 
-  if (!imgObj) hint.textContent = "Выбери фото.";
-  else if (corners.length < 4) hint.textContent = "Нажми «Выбрать 4 угла» и ткни 4 угла.";
-  else hint.textContent = scaleDirty ? "Масштаб/калибровка изменены — нажми «Анализ» заново." : "Готово. Нажми «Анализ».";
+  if(!imgObj) hint.textContent = "Выбери фото.";
+  else hint.textContent = "Нажми «Анализ».";
 }
 
 function clonePts(arr){ return arr.map(p => ({...p})); }
-
 function pushHistory(){
   history.push(JSON.stringify(points));
   if(history.length > 80) history.shift();
 }
-
 function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
-
 function nearestPoint(x,y, maxPx=PICK_R){
   let best = null;
   const p0 = {x,y};
@@ -191,7 +144,6 @@ function nearestPoint(x,y, maxPx=PICK_R){
   }
   return best ? best.i : -1;
 }
-
 function canvasXY(ev, canvas){
   const r = canvas.getBoundingClientRect();
   const x = (ev.clientX - r.left) * (canvas.width  / r.width);
@@ -199,49 +151,27 @@ function canvasXY(ev, canvas){
   return {x,y};
 }
 
-// перевод мм -> px радиуса для детектора
-function rpxFromMm(dmm){
-  return (dmm/2) / mmPerPx();
-}
-
-// пересчёт dMm для уже найденных точек при изменении frame/calib
-function recomputeDiametersInPlace(){
-  const mpp = mmPerPx();
-  const k = CALIB();
-  for(const p of points){
-    p.dMm = (2 * p.r) * mpp * k;
-  }
-  for(const p of basePoints){
-    p.dMm = (2 * p.r) * mpp * k;
-  }
-}
-
 // ----------------- Stats -----------------
 function classify(dMm){
-  if(dMm < 4) return "<4";
   if(dMm < 6) return "4–6";
   if(dMm < 10) return "6–10";
   if(dMm < 20) return "10–20";
   return "20+";
 }
-
 function stats(){
-  const min = DMIN_MM();
   let n=0, sum=0;
   let buckets = {"4–6":0,"6–10":0,"10–20":0,"20+":0};
-
   for(const p of points){
     if(p.excluded) continue;
-    if(p.dMm < min) continue;
+    if(p.dMm < DMIN_MM) continue;
     n++; sum += p.dMm;
-
     const cls = classify(p.dMm);
-    if(buckets[cls] != null) buckets[cls] += 1;
+    buckets[cls] += 1;
   }
   return { n, avg: n? (sum/n):0, buckets };
 }
 
-// ----------------- Redraw + Live -----------------
+// ----------------- Draw -----------------
 function redrawRect(){
   if(!lastWarped) return;
 
@@ -262,18 +192,14 @@ function redrawRect(){
   }
 
   const st = stats();
-  const min = DMIN_MM().toFixed(1);
-  const s = parseInt(sens.value,10);
-
-  const manualCount = points.filter(p=>p.src==="manual" && !p.excluded && p.dMm>=DMIN_MM()).length;
+  const manualCount = points.filter(p=>p.src==="manual" && !p.excluded && p.dMm>=DMIN_MM).length;
   const excludedCount = points.filter(p=>p.excluded).length;
 
   const text =
-`Грибы ≥ ${min} мм: ${st.n}
+`Грибы ≥ 4.0 мм: ${st.n}
 Средний диаметр: ${st.avg.toFixed(1)} мм
 Классы: 4–6=${st.buckets["4–6"]}, 6–10=${st.buckets["6–10"]}, 10–20=${st.buckets["10–20"]}, 20+=${st.buckets["20+"]}
-Sensitivity: ${s}
-Масштаб: ${mmPerPx().toFixed(4)} мм/px  Calib: ×${CALIB().toFixed(2)}
+Масштаб: ${mmPerPx.toFixed(4)} мм/px  Calib: ×${CALIB.toFixed(2)}
 Правки: manual=${manualCount}, excluded=${excludedCount}`;
 
   setOut(text, st.n ? "ok" : "bad");
@@ -282,7 +208,36 @@ Sensitivity: ${s}
   updateUI();
 }
 
-// ----------------- Image helpers -----------------
+function drawSourceWithCorners(corners){
+  // draw source
+  const maxW = 1100;
+  const sc = Math.min(1, maxW / imgObj.naturalWidth);
+  const w = Math.round(imgObj.naturalWidth * sc);
+  const h = Math.round(imgObj.naturalHeight * sc);
+  cSrc.width = w; cSrc.height = h;
+  srcCtx.drawImage(imgObj, 0, 0, w, h);
+
+  if(!corners) return;
+
+  srcCtx.lineWidth = 4;
+  srcCtx.strokeStyle = "#00ff00";
+  srcCtx.fillStyle = "#00ff00";
+
+  // poly
+  srcCtx.beginPath();
+  srcCtx.moveTo(corners[0].x, corners[0].y);
+  srcCtx.lineTo(corners[1].x, corners[1].y);
+  srcCtx.lineTo(corners[2].x, corners[2].y);
+  srcCtx.lineTo(corners[3].x, corners[3].y);
+  srcCtx.closePath();
+  srcCtx.stroke();
+
+  for(const p of corners){
+    srcCtx.beginPath(); srcCtx.arc(p.x,p.y,7,0,Math.PI*2); srcCtx.fill();
+  }
+}
+
+// ----------------- File load -----------------
 function fileToImg(f){
   return new Promise((resolve, reject) => {
     const i = new Image();
@@ -292,33 +247,111 @@ function fileToImg(f){
   });
 }
 
-function drawSource(){
-  const maxW = 1100;
-  const sc = Math.min(1, maxW / imgObj.naturalWidth);
-  const w = Math.round(imgObj.naturalWidth * sc);
-  const h = Math.round(imgObj.naturalHeight * sc);
-  cSrc.width = w; cSrc.height = h;
-  srcCtx.drawImage(imgObj, 0, 0, w, h);
+input.addEventListener("change", async () => {
+  autoCorners = null;
+  points = []; basePoints = []; history = []; lastWarped = null;
+  try{
+    imgObj = await fileToImg(input.files[0]);
+    drawSourceWithCorners(null);
+    setOut("Фото загружено. Нажми «Анализ».", "warn");
+    if(liveEl) liveEl.textContent = "Итог появится после анализа…";
+  }catch(e){
+    imgObj = null;
+    setOut("Ошибка загрузки фото.", "bad");
+  }
+  updateUI();
+});
 
-  if (corners.length){
-    srcCtx.lineWidth = 4;
-    srcCtx.strokeStyle = "#00ff00";
-    srcCtx.fillStyle = "#00ff00";
-    srcCtx.font = "20px system-ui";
-    corners.forEach((p,i)=>{
-      srcCtx.beginPath(); srcCtx.arc(p.x,p.y,8,0,Math.PI*2); srcCtx.fill();
-      srcCtx.fillText(String(i+1), p.x+10, p.y-10);
-    });
-    if (corners.length===4){
-      srcCtx.beginPath();
-      srcCtx.moveTo(corners[0].x,corners[0].y);
-      for(let i=1;i<4;i++) srcCtx.lineTo(corners[i].x,corners[i].y);
-      srcCtx.closePath(); srcCtx.stroke();
+// ----------------- Auto frame detection -----------------
+// We detect the largest rectangle by edges + Hough-like line voting (simple, no libs).
+// Works best when frame is visible and high-contrast.
+function detectFrameCorners(imageData, w, h){
+  const d = imageData.data;
+
+  // grayscale
+  const g = new Uint8ClampedArray(w*h);
+  for(let i=0;i<w*h;i++){
+    const r=d[i*4], gg=d[i*4+1], b=d[i*4+2];
+    g[i] = (0.2126*r + 0.7152*gg + 0.0722*b) | 0;
+  }
+
+  // sobel edges
+  const mag = new Float32Array(w*h);
+  const gxK = [-1,0,1,-2,0,2,-1,0,1];
+  const gyK = [-1,-2,-1,0,0,0,1,2,1];
+
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      let gx=0, gy=0;
+      let k=0;
+      for(let yy=-1;yy<=1;yy++){
+        for(let xx=-1;xx<=1;xx++){
+          const v = g[(y+yy)*w + (x+xx)];
+          gx += v*gxK[k];
+          gy += v*gyK[k];
+          k++;
+        }
+      }
+      mag[y*w+x] = Math.hypot(gx,gy);
     }
   }
+
+  // threshold edges (adaptive-ish)
+  let sum=0; for(let i=0;i<mag.length;i++) sum += mag[i];
+  const mean = sum/mag.length;
+  const thr = mean * 2.2;
+
+  // voting for vertical/horizontal lines:
+  // for each x column, count strong edges -> likely vertical frame borders
+  const col = new Int32Array(w);
+  const row = new Int32Array(h);
+
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      if(mag[y*w+x] > thr){
+        col[x]++; row[y]++;
+      }
+    }
+  }
+
+  function topPeaks(arr, k=6, minSep=20){
+    // return indices of strongest peaks
+    const idx = Array.from(arr.keys());
+    idx.sort((a,b)=>arr[b]-arr[a]);
+    const peaks=[];
+    for(const i of idx){
+      if(arr[i] <= 0) break;
+      if(peaks.every(p=>Math.abs(p-i) >= minSep)){
+        peaks.push(i);
+        if(peaks.length>=k) break;
+      }
+    }
+    peaks.sort((a,b)=>a-b);
+    return peaks;
+  }
+
+  const xs = topPeaks(col, 8, Math.max(10, (w*0.03)|0));
+  const ys = topPeaks(row, 8, Math.max(10, (h*0.03)|0));
+
+  if(xs.length < 2 || ys.length < 2) return null;
+
+  // choose farthest pair (left,right) and (top,bottom)
+  let left=xs[0], right=xs[xs.length-1];
+  let top=ys[0], bottom=ys[ys.length-1];
+
+  // sanity: ensure rectangle big enough
+  if((right-left) < w*0.35 || (bottom-top) < h*0.35) return null;
+
+  // corners in this downscaled space
+  return [
+    {x:left, y:top},
+    {x:right, y:top},
+    {x:right, y:bottom},
+    {x:left, y:bottom},
+  ];
 }
 
-// ----------------- Perspective warp -----------------
+// ----------------- Warp -----------------
 function warpToRect(sourceCanvas, srcPts, dstW, dstH){
   const dstPts = [{x:0,y:0},{x:dstW-1,y:0},{x:dstW-1,y:dstH-1},{x:0,y:dstH-1}];
   const H = computeHomography(dstPts, srcPts);
@@ -370,10 +403,12 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ----------------- DoG (multi-scale) -----------------
-function detectBlobsDoG(imageData, w, h, sensitivity){
-  const thr = 18 - sensitivity*0.7;
-  const thr2 = Math.max(3, thr);
+// ----------------- DoG blob detection (fixed) -----------------
+function rpxFromMmDetect(dmm){ return (dmm/2) / mmPerPx; }
+
+function detectBlobsDoG(imageData, w, h){
+  // fixed threshold tuned for your scenes
+  const thr2 = 7.0;
 
   const d = imageData.data;
   const g = new Float32Array(w*h);
@@ -384,15 +419,14 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
   const bg = boxBlur(g,w,h,18);
   for(let i=0;i<w*h;i++) g[i] = g[i] - bg[i];
 
-  const rMin = rpxFromMm(Math.max(3.5, DMIN_MM()));
-  const rMax = rpxFromMm(DMAX_DETECT_MM);
+  const rMin = rpxFromMmDetect(3.5);
+  const rMax = rpxFromMmDetect(DMAX_DETECT_MM);
 
   const sigmas = [];
   for(let r=rMin; r<=rMax; r*=1.22){
     sigmas.push(r/1.4142);
     if(sigmas.length > 18) break;
   }
-
   const blurs = sigmas.map(s => gaussianBlurSep(g,w,h,s));
 
   const candidates = [];
@@ -427,18 +461,17 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
     }
     if(!ok) continue;
 
-    // Диаметр в мм = 2r(px) * mm/px * calib
-    const dMm = (2*c.r) * mmPerPx() * CALIB();
+    const dMm = (2*c.r) * mmPerPx * CALIB;
     if(dMm < 2.5) continue;
     if(dMm > (DMAX_DETECT_MM + 5)) continue;
 
     kept.push({ x:c.x, y:c.y, r:c.r, dMm });
-    if(kept.length > 520) break;
+    if(kept.length > 500) break;
   }
   return kept;
 }
 
-// ----------------- Blurs -----------------
+// ----------------- blurs -----------------
 function gaussianBlurSep(src,w,h,sigma){
   const r = Math.max(1, Math.ceil(sigma*2.5));
   const k = gaussianKernel1D(sigma, r);
@@ -499,7 +532,57 @@ function boxBlur(src,w,h,r){
   return dst;
 }
 
-// ----------------- Edit actions -----------------
+// ----------------- Analyze -----------------
+runBtn.addEventListener("click", ()=>{
+  if(!imgObj) return;
+
+  setOut("Поиск рамки…", "warn");
+
+  // draw source first
+  drawSourceWithCorners(null);
+
+  // downscale for detection (fast)
+  const detW = 520;
+  const detH = Math.round(cSrc.height * (detW / cSrc.width));
+  const tmp = document.createElement("canvas");
+  tmp.width = detW; tmp.height = detH;
+  const tctx = tmp.getContext("2d", { willReadFrequently:true });
+  tctx.drawImage(cSrc, 0, 0, detW, detH);
+
+  const imgD = tctx.getImageData(0,0,detW,detH);
+  const detCorners = detectFrameCorners(imgD, detW, detH);
+
+  if(!detCorners){
+    setOut("Не смог найти рамку автоматически. Сделай фото так, чтобы рамка была целиком в кадре.", "bad");
+    return;
+  }
+
+  // scale corners back to source canvas coords
+  const sx = cSrc.width / detW;
+  const sy = cSrc.height / detH;
+  autoCorners = detCorners.map(p => ({x:p.x*sx, y:p.y*sy}));
+
+  drawSourceWithCorners(autoCorners);
+  setOut("Рамка найдена. Warp + подсчёт…", "warn");
+
+  // warp
+  const warped = warpToRect(cSrc, autoCorners, RECT, RECT);
+  lastWarped = warped;
+
+  cRect.width = RECT; cRect.height = RECT;
+  rectCtx.putImageData(warped, 0, 0);
+
+  // detect blobs
+  const result = detectBlobsDoG(warped, RECT, RECT);
+
+  basePoints = result.map(p => ({...p, src:"auto", excluded:false}));
+  points = clonePts(basePoints);
+  history = [];
+
+  redrawRect();
+});
+
+// ----------------- Editing -----------------
 function toggleAt(x,y){
   const idx = nearestPoint(x,y,PICK_R);
   if(idx < 0) return;
@@ -509,8 +592,8 @@ function toggleAt(x,y){
 }
 function addManualAt(x,y){
   pushHistory();
-  const dMm = Math.max(6.0, DMIN_MM());
-  const r = (dMm/2) / mmPerPx(); // manual радиус в px по текущему масштабу
+  const dMm = 6.0;
+  const r = (dMm/2) / mmPerPx;
   points.push({x,y,r,dMm,src:"manual",excluded:false});
   redrawRect();
 }
@@ -530,71 +613,7 @@ function moveDragTo(x,y){
 }
 function endDrag(){ dragging=false; dragIdx=-1; }
 
-// ----------------- Events -----------------
-input.addEventListener("change", async () => {
-  corners = []; picking = false;
-  basePoints = []; points = []; history = []; lastWarped = null;
-  scaleDirty = false;
-  try{
-    imgObj = await fileToImg(input.files[0]);
-    drawSource();
-    setOut("Фото загружено. Выбери 4 угла рамки.", "warn");
-    if(liveEl) liveEl.textContent = "Итог появится после анализа…";
-  }catch(e){
-    imgObj = null;
-    setOut("Ошибка загрузки фото.", "bad");
-  }
-  updateUI();
-});
-
-pickBtn.addEventListener("click", () => {
-  corners = []; picking = true;
-  setOut("Ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН).", "warn");
-  drawSource();
-  updateUI();
-});
-
-cSrc.addEventListener("click", (ev) => {
-  if (!picking) return;
-  const r = cSrc.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (cSrc.width  / r.width);
-  const y = (ev.clientY - r.top)  * (cSrc.height / r.height);
-  corners.push({x,y});
-  drawSource();
-  if (corners.length === 4){
-    picking = false;
-    setOut("Углы выбраны. Нажми «Анализ».", "ok");
-  }
-  updateUI();
-});
-
-runBtn.addEventListener("click", () => {
-  if (!imgObj || corners.length !== 4) return;
-
-  setOut("Распремление и blob-анализ…", "warn");
-
-  const warped = warpToRect(cSrc, corners, RECT, RECT);
-  lastWarped = warped;
-
-  cRect.width = RECT; cRect.height = RECT;
-  rectCtx.putImageData(warped, 0, 0);
-
-  const s = parseInt(sens.value,10);
-  const result = detectBlobsDoG(warped, RECT, RECT, s);
-
-  basePoints = result.map(p => ({
-    x:p.x, y:p.y, r:p.r, dMm:p.dMm,
-    src:"auto",
-    excluded:false
-  }));
-
-  history = [];
-  points = clonePts(basePoints);
-  scaleDirty = false;
-  redrawRect();
-});
-
-// Desktop mouse
+// Desktop
 cRect.addEventListener("mousedown", (ev)=>{
   if(!lastWarped) return;
   const p = canvasXY(ev, cRect);
@@ -674,8 +693,7 @@ cRect.addEventListener("touchend", (ev)=>{
 // Buttons
 undoBtn.addEventListener("click", ()=>{
   if(!history.length) return;
-  const prev = history.pop();
-  points = JSON.parse(prev);
+  points = JSON.parse(history.pop());
   redrawRect();
 });
 clearManualBtn.addEventListener("click", ()=>{
@@ -691,58 +709,30 @@ resetEditsBtn.addEventListener("click", ()=>{
 });
 exportBtn.addEventListener("click", ()=>{
   const payload = {
-    version: "A1.9_FULL",
+    version: "A2.0_SIMPLE",
     rect_px: RECT,
-    frame_mm: FRAME_MM(),
-    mm_per_px: mmPerPx(),
-    calib: CALIB(),
-    min_mm: DMIN_MM(),
-    sensitivity: parseInt(sens.value,10),
+    frame_mm: FRAME_MM,
+    mm_per_px: mmPerPx,
+    calib: CALIB,
+    min_mm: DMIN_MM,
     detect_max_mm: DMAX_DETECT_MM,
     points: points
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "mwc_a1_9_points.json";
+  a.download = "mwc_a2_0_points.json";
   a.click();
 });
 savePngBtn.addEventListener("click", ()=>{
   if(!lastWarped) return;
   const a = document.createElement("a");
   a.href = cRect.toDataURL("image/png");
-  a.download = "mwc_a1_9_marked.png";
+  a.download = "mwc_a2_0_marked.png";
   a.click();
 });
 
-// Scale / Calib change handlers
-framemm.addEventListener("input", ()=>{
-  framemmVal.textContent = `${FRAME_MM()} мм`;
-  if(lastWarped){
-    scaleDirty = true;
-    recomputeDiametersInPlace(); // чтобы хотя бы цифры обновились
-    redrawRect();
-  }
-});
-calib.addEventListener("input", ()=>{
-  calibVal.textContent = `×${CALIB().toFixed(2)}`;
-  if(lastWarped){
-    scaleDirty = true;
-    recomputeDiametersInPlace();
-    redrawRect();
-  }
-});
-sens.addEventListener("input", ()=> sensVal.textContent = sens.value);
-minmm.addEventListener("input", ()=> {
-  minmmVal.textContent = Number(minmm.value).toFixed(1);
-  if(lastWarped) redrawRect();
-});
-
-// init labels
-framemmVal.textContent = `${FRAME_MM()} мм`;
-calibVal.textContent = `×${CALIB().toFixed(2)}`;
-sensVal.textContent = sens.value;
-minmmVal.textContent = Number(minmm.value).toFixed(1);
+// init
 updateUI();
 </script>
 </body>
