@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 FINAL PRO</title>
+<title>MWC — A1.6 FINAL PRO v2</title>
 <meta name="theme-color" content="#111">
 <style>
 body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -25,10 +25,10 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 </head>
 
 <body>
-<h1>MWC — A1.6 FINAL PRO</h1>
+<h1>MWC — A1.6 FINAL PRO v2</h1>
 <div class="small">
-🟢 = пины <b>4–12 мм</b> (пошли в рост) • 🟡 = пины <b>&lt;4 мм</b> (мелочь/запас)<br>
-Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b> (очень важно).
+🟢 = пины <b>4–12 мм</b> (в рост) • 🟡 = <b>&lt;4 мм</b> (мелочь)<br>
+Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>
 </div>
 
 <div class="card">
@@ -128,7 +128,6 @@ runBtn.addEventListener("click", () => {
 
   rectCtx.putImageData(warped, 0, 0);
 
-  // draw: small yellow, grow green
   rectCtx.lineWidth = 3;
 
   rectCtx.strokeStyle = "#ffd400"; // yellow
@@ -253,14 +252,12 @@ function analyzeRectPRO(imageData, w, h){
 
   const bg = boxBlur(gray,w,h,18);
 
-  // TWO thresholds:
-  // T1 catches bright tiny pins; T2 catches darker/larger pins (4–7mm often here)
-  const T1 = 12;   // strict
-  const T2 = 7;    // softer (important!)
-  const MIN_AREA = 16;
-  const MIN_CIRC = 0.20;
+  // v2 tweaks:
+  const T1 = 12;  // strict for bright points
+  const T2 = 4;   // ✅ softer for darker 4–7mm pins (was 7)
+  const MIN_AREA = 14;
+  const MIN_CIRC = 0.16; // ✅ softer shape (was 0.20)
 
-  // Build two binary masks
   let bin1=new Uint8Array(w*h);
   let bin2=new Uint8Array(w*h);
   for(let i=0;i<w*h;i++){
@@ -269,21 +266,14 @@ function analyzeRectPRO(imageData, w, h){
     bin2[i] = (v > T2) ? 1 : 0;
   }
 
-  // clean masks
   bin1 = close(bin1,w,h);
   bin2 = close(bin2,w,h);
 
-  // components from both masks, then merge by proximity (to avoid double-count)
   const cand1 = components(bin1,w,h);
   const cand2 = components(bin2,w,h);
 
-  const all = [];
-  for (const c of cand1) all.push(c);
-  for (const c of cand2) all.push(c);
-
-  // Convert to circles + size filter, then merge near-duplicates
   const circles = [];
-  for(const c of all){
+  for (const c of cand1.concat(cand2)){
     if(c.area < MIN_AREA) continue;
     const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
     if(circ < MIN_CIRC) continue;
@@ -292,7 +282,9 @@ function analyzeRectPRO(imageData, w, h){
     circles.push({cx:c.cx, cy:c.cy, dPx, dMm});
   }
 
-  const merged = mergeClose(circles, 10); // px
+  // ✅ less aggressive merge (was 10px)
+  const merged = mergeClose(circles, 6);
+
   const small = [];
   const grow  = [];
   for(const p of merged){
@@ -307,20 +299,18 @@ function mergeClose(list, distPx){
   const used = new Uint8Array(list.length);
   for(let i=0;i<list.length;i++){
     if(used[i]) continue;
-    let x=list[i].cx, y=list[i].cy, w=1, best=list[i];
+    let best=list[i];
     used[i]=1;
+
     for(let j=i+1;j<list.length;j++){
       if(used[j]) continue;
-      const dx=list[j].cx-x, dy=list[j].cy-y;
+      const dx=list[j].cx-best.cx, dy=list[j].cy-best.cy;
       if(dx*dx+dy*dy <= distPx*distPx){
         used[j]=1;
-        x = (x*w + list[j].cx)/(w+1);
-        y = (y*w + list[j].cy)/(w+1);
-        w++;
         if(list[j].dPx > best.dPx) best = list[j];
       }
     }
-    out.push({cx:x, cy:y, dPx:best.dPx, dMm:best.dMm});
+    out.push(best);
   }
   return out;
 }
@@ -362,7 +352,6 @@ function erode(b,w,h){
   return o;
 }
 function close(b,w,h){
-  // closing then opening to stabilize blobs
   let x = erode(dilate(b,w,h),w,h);
   x = dilate(erode(x,w,h),w,h);
   return x;
