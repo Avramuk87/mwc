@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 FINAL tuned</title>
+<title>MWC — A1.6 FINAL PRO</title>
 <meta name="theme-color" content="#111">
 <style>
 body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -25,9 +25,10 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 </head>
 
 <body>
-<h1>MWC — A1.6 FINAL (tuned) — пины 4–12 мм</h1>
+<h1>MWC — A1.6 FINAL PRO</h1>
 <div class="small">
-Шаги: 1) выбери фото → 2) ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН) → 3) Анализ.
+🟢 = пины <b>4–12 мм</b> (пошли в рост) • 🟡 = пины <b>&lt;4 мм</b> (мелочь/запас)<br>
+Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b> (очень важно).
 </div>
 
 <div class="card">
@@ -51,7 +52,7 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 <div class="card">
   <b>Распремлённая рамка (800×800)</b>
   <canvas id="rect"></canvas>
-  <div class="small">🟢 — засчитанные пины 4–12 мм</div>
+  <div class="small">🟢 4–12 мм • 🟡 &lt;4 мм</div>
 </div>
 
 <script>
@@ -70,8 +71,8 @@ let picking = false;
 let corners = [];
 
 const RECT = 800;       // px
-const FRAME_MM = 200;  // 20×20 см
-const mmPerPx = FRAME_MM / RECT; // точный масштаб
+const FRAME_MM = 200;   // 20×20 см
+const mmPerPx = FRAME_MM / RECT;
 
 function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
 function updateUI(){
@@ -123,23 +124,37 @@ runBtn.addEventListener("click", () => {
   cRect.width = RECT; cRect.height = RECT;
   rectCtx.putImageData(warped, 0, 0);
 
-  const res = analyzeRect(warped, RECT, RECT);
+  const {small, grow} = analyzeRectPRO(warped, RECT, RECT);
 
   rectCtx.putImageData(warped, 0, 0);
-  rectCtx.lineWidth = 3;
-  rectCtx.strokeStyle = "#00ff00";
 
+  // draw: small yellow, grow green
+  rectCtx.lineWidth = 3;
+
+  rectCtx.strokeStyle = "#ffd400"; // yellow
+  for (const p of small){
+    rectCtx.beginPath();
+    rectCtx.arc(p.cx, p.cy, Math.max(5, p.dPx/2), 0, Math.PI*2);
+    rectCtx.stroke();
+  }
+
+  rectCtx.strokeStyle = "#00ff00"; // green
   let sum = 0;
-  for (const p of res){
+  for (const p of grow){
     sum += p.dMm;
     rectCtx.beginPath();
     rectCtx.arc(p.cx, p.cy, Math.max(6, p.dPx/2), 0, Math.PI*2);
     rectCtx.stroke();
   }
 
-  const n = res.length;
-  const avg = n ? (sum/n).toFixed(1) : "0.0";
-  setOut(`Пинов 4–12 мм: ${n}\nСредний диаметр: ${avg} мм\nМасштаб: ${mmPerPx.toFixed(4)} мм/px`, n?"ok":"bad");
+  const avg = grow.length ? (sum/grow.length).toFixed(1) : "0.0";
+  setOut(
+    `Пины <4 мм (мелочь): ${small.length}\n`+
+    `Пины 4–12 мм (в рост): ${grow.length}\n`+
+    `Средний диаметр (в рост): ${avg} мм\n`+
+    `Масштаб: ${mmPerPx.toFixed(4)} мм/px`,
+    (grow.length>0) ? "ok" : "bad"
+  );
 });
 
 // ---------- helpers ----------
@@ -230,43 +245,95 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ---------- analysis (TUNED) ----------
-function analyzeRect(imageData, w, h){
+// ---------- analysis (PRO dual-threshold) ----------
+function analyzeRectPRO(imageData, w, h){
   const d=imageData.data;
   const gray=new Float32Array(w*h);
   for(let i=0;i<w*h;i++) gray[i]=0.2126*d[i*4]+0.7152*d[i*4+1]+0.0722*d[i*4+2];
 
-  // local background
   const bg = boxBlur(gray,w,h,18);
 
-  // ✅ TUNED sensitivity: +12 (was +18)
-  let bin=new Uint8Array(w*h);
-  for(let i=0;i<w*h;i++) bin[i]=(gray[i]>bg[i]+12)?1:0;
+  // TWO thresholds:
+  // T1 catches bright tiny pins; T2 catches darker/larger pins (4–7mm often here)
+  const T1 = 12;   // strict
+  const T2 = 7;    // softer (important!)
+  const MIN_AREA = 16;
+  const MIN_CIRC = 0.20;
 
-  bin = erode(dilate(bin,w,h),w,h);
+  // Build two binary masks
+  let bin1=new Uint8Array(w*h);
+  let bin2=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const v = gray[i]-bg[i];
+    bin1[i] = (v > T1) ? 1 : 0;
+    bin2[i] = (v > T2) ? 1 : 0;
+  }
 
-  const comps = cc(bin,w,h);
-  const pins=[];
-  for(const c of comps){
-    if(c.area<18) continue;
+  // clean masks
+  bin1 = close(bin1,w,h);
+  bin2 = close(bin2,w,h);
 
+  // components from both masks, then merge by proximity (to avoid double-count)
+  const cand1 = components(bin1,w,h);
+  const cand2 = components(bin2,w,h);
+
+  const all = [];
+  for (const c of cand1) all.push(c);
+  for (const c of cand2) all.push(c);
+
+  // Convert to circles + size filter, then merge near-duplicates
+  const circles = [];
+  for(const c of all){
+    if(c.area < MIN_AREA) continue;
     const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
-
-    // ✅ TUNED circularity: 0.22 (was 0.28)
-    if(circ<0.22) continue;
-
+    if(circ < MIN_CIRC) continue;
     const dPx=2*Math.sqrt(c.area/Math.PI);
     const dMm=dPx*mmPerPx;
-
-    // keep 4–12 mm
-    if(dMm>=4 && dMm<=12) pins.push({cx:c.cx,cy:c.cy,dPx,dMm});
+    circles.push({cx:c.cx, cy:c.cy, dPx, dMm});
   }
-  return pins;
+
+  const merged = mergeClose(circles, 10); // px
+  const small = [];
+  const grow  = [];
+  for(const p of merged){
+    if(p.dMm < 4) small.push(p);
+    else if(p.dMm <= 12) grow.push(p);
+  }
+  return {small, grow};
+}
+
+function mergeClose(list, distPx){
+  const out = [];
+  const used = new Uint8Array(list.length);
+  for(let i=0;i<list.length;i++){
+    if(used[i]) continue;
+    let x=list[i].cx, y=list[i].cy, w=1, best=list[i];
+    used[i]=1;
+    for(let j=i+1;j<list.length;j++){
+      if(used[j]) continue;
+      const dx=list[j].cx-x, dy=list[j].cy-y;
+      if(dx*dx+dy*dy <= distPx*distPx){
+        used[j]=1;
+        x = (x*w + list[j].cx)/(w+1);
+        y = (y*w + list[j].cy)/(w+1);
+        w++;
+        if(list[j].dPx > best.dPx) best = list[j];
+      }
+    }
+    out.push({cx:x, cy:y, dPx:best.dPx, dMm:best.dMm});
+  }
+  return out;
 }
 
 function boxBlur(src,w,h,r){
   const dst=new Float32Array(w*h), iw=w+1, integ=new Float32Array((w+1)*(h+1));
-  for(let y=1;y<=h;y++){ let s=0; for(let x=1;x<=w;x++){ s+=src[(y-1)*w+(x-1)]; integ[y*iw+x]=integ[(y-1)*iw+x]+s; } }
+  for(let y=1;y<=h;y++){
+    let s=0;
+    for(let x=1;x<=w;x++){
+      s+=src[(y-1)*w+(x-1)];
+      integ[y*iw+x]=integ[(y-1)*iw+x]+s;
+    }
+  }
   for(let y=0;y<h;y++){
     const y0=Math.max(0,y-r), y1=Math.min(h-1,y+r);
     for(let x=0;x<w;x++){
@@ -277,24 +344,46 @@ function boxBlur(src,w,h,r){
   }
   return dst;
 }
-function dilate(b,w,h){ const o=new Uint8Array(w*h);
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){ const p=y*w+x;
-    o[p]=b[p]||b[p-1]||b[p+1]||b[p-w]||b[p+w]||b[p-w-1]||b[p-w+1]||b[p+w-1]||b[p+w+1]?1:0;}
+
+function dilate(b,w,h){
+  const o=new Uint8Array(w*h);
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
+    const p=y*w+x;
+    o[p]=b[p]||b[p-1]||b[p+1]||b[p-w]||b[p+w]||b[p-w-1]||b[p-w+1]||b[p+w-1]||b[p+w+1]?1:0;
+  }
   return o;
 }
-function erode(b,w,h){ const o=new Uint8Array(w*h);
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){ const p=y*w+x;
-    o[p]=b[p]&&b[p-1]&&b[p+1]&&b[p-w]&&b[p+w]&&b[p-w-1]&&b[p-w+1]&&b[p+w-1]&&b[p+w+1]?1:0;}
+function erode(b,w,h){
+  const o=new Uint8Array(w*h);
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
+    const p=y*w+x;
+    o[p]=b[p]&&b[p-1]&&b[p+1]&&b[p-w]&&b[p+w]&&b[p-w-1]&&b[p-w+1]&&b[p+w-1]&&b[p+w+1]?1:0;
+  }
   return o;
 }
-function cc(b,w,h){
+function close(b,w,h){
+  // closing then opening to stabilize blobs
+  let x = erode(dilate(b,w,h),w,h);
+  x = dilate(erode(x,w,h),w,h);
+  return x;
+}
+
+function components(b,w,h){
   const v=new Uint8Array(w*h), st=[], res=[], id=(x,y)=>y*w+x;
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){ const p=id(x,y);
-    if(!b[p]||v[p]) continue; let a=0,sx=0,sy=0,per=0; st.length=0; st.push(p); v[p]=1;
-    while(st.length){ const q=st.pop(), qy=(q/w)|0, qx=q-qy*w; a++; sx+=qx; sy+=qy;
-      const n1=q-1,n2=q+1,n3=q-w,n4=q+w; if(!b[n1])per++; if(!b[n2])per++; if(!b[n3])per++; if(!b[n4])per++;
-      if(b[n1]&&!v[n1]){v[n1]=1;st.push(n1)} if(b[n2]&&!v[n2]){v[n2]=1;st.push(n2)}
-      if(b[n3]&&!v[n3]){v[n3]=1;st.push(n3)} if(b[n4]&&!v[n4]){v[n4]=1;st.push(n4)}
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
+    const p=id(x,y);
+    if(!b[p]||v[p]) continue;
+    let a=0,sx=0,sy=0,per=0;
+    st.length=0; st.push(p); v[p]=1;
+    while(st.length){
+      const q=st.pop(), qy=(q/w)|0, qx=q-qy*w;
+      a++; sx+=qx; sy+=qy;
+      const n1=q-1,n2=q+1,n3=q-w,n4=q+w;
+      if(!b[n1])per++; if(!b[n2])per++; if(!b[n3])per++; if(!b[n4])per++;
+      if(b[n1]&&!v[n1]){v[n1]=1;st.push(n1)}
+      if(b[n2]&&!v[n2]){v[n2]=1;st.push(n2)}
+      if(b[n3]&&!v[n3]){v[n3]=1;st.push(n3)}
+      if(b[n4]&&!v[n4]){v[n4]=1;st.push(n4)}
     }
     res.push({area:a,cx:sx/a,cy:sy/a,per});
   }
