@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.7 BLOB FINAL + Edit</title>
+<title>MWC — A1.8 (≥4 мм) DoG + Edit</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -27,10 +27,10 @@
 </head>
 
 <body>
-<h1>MWC — A1.7 BLOB FINAL (4–12 мм) + корректировка</h1>
+<h1>MWC — A1.8 (DoG + ползунок + корректировка) — считаем ≥4 мм</h1>
 <div class="small">
 Метод: DoG blob detection (устойчив к текстуре/мицелию).<br>
-Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>. Считаем только <b>4–12 мм</b> (в рост).<br>
+Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>. Считаем <b>все грибы ≥ 4 мм</b> (включая крупные).<br>
 <b>Редактирование:</b> Tap=toggle • DoubleTap=add • Hold+Drag=move
 </div>
 
@@ -42,9 +42,13 @@
     <button id="run" disabled>Анализ</button>
   </div>
 
-  <label class="small"><b>Sensitivity</b> (меньше = строже, больше = больше пинов)</label>
+  <label class="small"><b>Sensitivity</b> (меньше = строже, больше = больше находок)</label>
   <input id="sens" type="range" min="1" max="20" value="8">
   <div class="small kv" id="sensVal">8</div>
+
+  <label class="small"><b>Min size</b> (мм) — нижний порог для подсчёта</label>
+  <input id="minmm" type="range" min="3" max="10" value="4" step="0.5">
+  <div class="small kv" id="minmmVal">4.0</div>
 
   <div class="small" id="hint">Выбери фото.</div>
 </div>
@@ -67,67 +71,88 @@
   </div>
   <div class="row">
     <button id="export" class="secondary" disabled>Экспорт JSON</button>
+    <button id="savepng" class="secondary" disabled>Сохранить PNG</button>
   </div>
   <div class="small kv" id="editHint">Tap=toggle • DoubleTap=add • Hold+Drag=move</div>
   <div class="small">🟢 auto • 🟡 manual • 🔴 excluded</div>
 </div>
 
 <script>
+// ----------------- DOM -----------------
 const input = document.getElementById("img");
 const pickBtn = document.getElementById("pick");
 const runBtn  = document.getElementById("run");
 const hint = document.getElementById("hint");
 const out  = document.getElementById("out");
+
 const cSrc = document.getElementById("src");
 const cRect= document.getElementById("rect");
 const srcCtx = cSrc.getContext("2d", { willReadFrequently:true });
 const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
+
 const sens = document.getElementById("sens");
 const sensVal = document.getElementById("sensVal");
+
+const minmm = document.getElementById("minmm");
+const minmmVal = document.getElementById("minmmVal");
 
 const undoBtn = document.getElementById("undo");
 const clearManualBtn = document.getElementById("clearManual");
 const resetEditsBtn = document.getElementById("resetEdits");
 const exportBtn = document.getElementById("export");
+const savePngBtn = document.getElementById("savepng");
 
 sens.addEventListener("input", ()=> sensVal.textContent = sens.value);
+minmm.addEventListener("input", ()=> {
+  minmmVal.textContent = Number(minmm.value).toFixed(1);
+  // если уже есть точки — просто перерисуем и пересчитаем (без повторного DoG)
+  if(lastWarped) redrawRect();
+});
 
+// ----------------- State -----------------
 let imgObj = null;
 let picking = false;
 let corners = [];
 
-// ---------- constants ----------
+let points = [];        // (auto + manual) + excluded
+let basePoints = [];    // чистый DoG
+let history = [];       // undo
+let lastWarped = null;  // ImageData для redraw
+
+// ----------------- Constants -----------------
 const RECT = 800;
 const FRAME_MM = 200;
-const mmPerPx = FRAME_MM / RECT;      // 0.25 мм/px
+const mmPerPx = FRAME_MM / RECT; // 0.25 мм/px
 
-const DMIN_MM = 4.0;
-const DMAX_MM = 12.0;
+// Нижний порог берём из ползунка (по умолчанию 4 мм)
+function DMIN_MM(){ return Number(minmm.value); }
 
+// Верхний “потолок” для детектора (чтобы DoG не ловил огромные пятна фона).
+// Это НЕ значит, что мы “не считаем большие”: просто ограничиваем масштаб анализа.
+const DMAX_DETECT_MM = 60.0; // если нужно больше — скажешь (80/100)
+
+// Переводы мм <-> px
 function rpxFromMm(dmm){ return (dmm/2) / mmPerPx; }
-const RMIN = rpxFromMm(DMIN_MM); // ~8 px
-const RMAX = rpxFromMm(DMAX_MM); // ~24 px
 
 function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
+
 function updateUI(){
   pickBtn.disabled = !imgObj;
   runBtn.disabled = !(imgObj && corners.length === 4);
+  savePngBtn.disabled = !lastWarped;
+  exportBtn.disabled = points.length === 0;
+
   if (!imgObj) hint.textContent = "Выбери фото.";
   else if (corners.length < 4) hint.textContent = "Нажми «Выбрать 4 угла» и ткни 4 угла.";
   else hint.textContent = "Готово. Нажми «Анализ».";
 }
 
-// ----------------- EDIT STATE (A1.7) -----------------
-let points = [];        // (auto + manual) с excluded
-let basePoints = [];    // чистый DoG результат
-let history = [];       // undo stack
-let lastWarped = null;  // фон для перерисовки
-
+// ----------------- Edit helpers -----------------
 function clonePts(arr){ return arr.map(p => ({...p})); }
 
 function pushHistory(){
   history.push(JSON.stringify(points));
-  if(history.length > 60) history.shift();
+  if(history.length > 80) history.shift();
   undoBtn.disabled = history.length === 0;
 }
 
@@ -137,6 +162,7 @@ function setPoints(newPts){
   clearManualBtn.disabled = points.filter(p=>p.src==="manual").length === 0;
   resetEditsBtn.disabled = basePoints.length === 0;
   exportBtn.disabled = points.length === 0;
+  savePngBtn.disabled = !lastWarped;
 }
 
 function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
@@ -153,25 +179,48 @@ function nearestPoint(x,y, maxPx=28){
   return best ? best.i : -1;
 }
 
-function countInRange(){
-  let n=0,sum=0;
-  for(const p of points){
-    if(p.excluded) continue;
-    if(p.dMm < DMIN_MM || p.dMm > DMAX_MM) continue;
-    n++; sum += p.dMm;
-  }
-  return {n, avg: n? (sum/n):0};
+function canvasXY(ev, canvas){
+  const r = canvas.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (canvas.width  / r.width);
+  const y = (ev.clientY - r.top)  * (canvas.height / r.height);
+  return {x,y};
 }
 
+// ----------------- Counting & classes -----------------
+function classify(dMm){
+  if(dMm < 4) return "<4";
+  if(dMm < 6) return "4–6";
+  if(dMm < 10) return "6–10";
+  if(dMm < 20) return "10–20";
+  return "20+";
+}
+
+function stats(){
+  const min = DMIN_MM();
+  let n=0, sum=0;
+  let buckets = {"4–6":0,"6–10":0,"10–20":0,"20+":0};
+
+  for(const p of points){
+    if(p.excluded) continue;
+    if(p.dMm < min) continue;
+    n++; sum += p.dMm;
+    const cls = classify(p.dMm);
+    if(buckets[cls] != null) buckets[cls] += 1;
+  }
+  return { n, avg: n? (sum/n):0, buckets };
+}
+
+// ----------------- Redraw -----------------
 function redrawRect(){
   if(!lastWarped) return;
   rectCtx.putImageData(lastWarped, 0, 0);
 
   for(const p of points){
+    // показываем все (и маленькие тоже), но красим/считаем по порогу
     const active = !p.excluded;
     const isManual = p.src === "manual";
-    rectCtx.lineWidth = 3;
 
+    rectCtx.lineWidth = 3;
     if(!active) rectCtx.strokeStyle = "#ff3333";
     else if(isManual) rectCtx.strokeStyle = "#ffd400";
     else rectCtx.strokeStyle = "#00ff00";
@@ -181,22 +230,24 @@ function redrawRect(){
     rectCtx.stroke();
   }
 
-  const {n, avg} = countInRange();
   const s = parseInt(sens.value,10);
+  const st = stats();
+  const min = DMIN_MM().toFixed(1);
+
   setOut(
-    `Пины 4–12 мм (в рост): ${n}\nСредний диаметр: ${avg.toFixed(1)} мм\nSensitivity: ${s}\nМасштаб: ${mmPerPx.toFixed(4)} мм/px\nПравки: manual=${points.filter(p=>p.src==="manual").length}, excluded=${points.filter(p=>p.excluded).length}`,
-    n ? "ok" : "bad"
+`Грибы ≥ ${min} мм: ${st.n}
+Средний диаметр: ${st.avg.toFixed(1)} мм
+Классы: 4–6=${st.buckets["4–6"]}, 6–10=${st.buckets["6–10"]}, 10–20=${st.buckets["10–20"]}, 20+=${st.buckets["20+"]}
+Sensitivity: ${s}
+Масштаб: ${mmPerPx.toFixed(4)} мм/px
+Правки: manual=${points.filter(p=>p.src==="manual").length}, excluded=${points.filter(p=>p.excluded).length}`,
+      st.n ? "ok" : "bad"
   );
+
+  updateUI();
 }
 
-function canvasXY(ev, canvas){
-  const r = canvas.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (canvas.width  / r.width);
-  const y = (ev.clientY - r.top)  * (canvas.height / r.height);
-  return {x,y};
-}
-
-// ---------- image helpers ----------
+// ----------------- Image helpers -----------------
 function fileToImg(f){
   return new Promise((resolve, reject) => {
     const i = new Image();
@@ -232,7 +283,7 @@ function drawSource(){
   }
 }
 
-// ---------- perspective warp ----------
+// ----------------- Perspective warp -----------------
 function warpToRect(sourceCanvas, srcPts, dstW, dstH){
   const dstPts = [{x:0,y:0},{x:dstW-1,y:0},{x:dstW-1,y:dstH-1},{x:0,y:dstH-1}];
   const H = computeHomography(dstPts, srcPts);
@@ -284,23 +335,31 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ---------- DoG blob detection ----------
+// ----------------- DoG blob detection (multi-scale) -----------------
 function detectBlobsDoG(imageData, w, h, sensitivity){
+  // sensitivity 1..20 -> lower = stricter, higher = more detections
   const thr = 18 - sensitivity*0.7; // ~17.3 .. ~4
   const thr2 = Math.max(3, thr);
 
+  // grayscale float
   const d = imageData.data;
   const g = new Float32Array(w*h);
   for(let i=0;i<w*h;i++){
     g[i] = 0.2126*d[i*4] + 0.7152*d[i*4+1] + 0.0722*d[i*4+2];
   }
 
+  // remove slow background (helps with mycelium texture)
   const bg = boxBlur(g,w,h,18);
   for(let i=0;i<w*h;i++) g[i] = g[i] - bg[i];
 
+  // scales: from >=4mm up to detect ceiling (DMAX_DETECT_MM)
+  const RMIN = rpxFromMm(Math.max(3.5, DMIN_MM()));   // чуть ниже порога, чтобы не “рубило” на границе
+  const RMAX = rpxFromMm(DMAX_DETECT_MM);
+
   const sigmas = [];
-  for(let r=RMIN; r<=RMAX; r*=1.18){
+  for(let r=RMIN; r<=RMAX; r*=1.22){
     sigmas.push(r/1.4142);
+    if(sigmas.length > 18) break; // safety
   }
 
   const blurs = sigmas.map(s => gaussianBlurSep(g,w,h,s));
@@ -317,6 +376,7 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
         const idx = y*w + x;
         const v = dog[idx];
         if(v < thr2) continue;
+        // local max in 3x3
         if(v < dog[idx-1] || v < dog[idx+1] || v < dog[idx-w] || v < dog[idx+w]) continue;
         if(v < dog[idx-w-1] || v < dog[idx-w+1] || v < dog[idx+w-1] || v < dog[idx+w+1]) continue;
         candidates.push({x,y,score:v,r});
@@ -324,6 +384,7 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
     }
   }
 
+  // sort + NMS
   candidates.sort((p,q)=>q.score-p.score);
   const kept = [];
   const minDist = 10;
@@ -338,21 +399,27 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
     if(!ok) continue;
 
     const dMm = (2*c.r) * mmPerPx;
-    if(dMm < DMIN_MM || dMm > DMAX_MM) continue;
+
+    // здесь НЕ отсекаем крупные сверху — только sanity по детект-потолку
+    // а фильтр по "считаем ≥ minmm" делается в stats()/output
+    if(dMm < 2.5) continue;
+    if(dMm > (DMAX_DETECT_MM + 5)) continue;
 
     kept.push({ x:c.x, y:c.y, r:c.r, dMm });
-    if(kept.length > 250) break;
+    if(kept.length > 420) break; // safety
   }
+
   return kept;
 }
 
-// ---------- blurs ----------
+// ----------------- Blurs -----------------
 function gaussianBlurSep(src,w,h,sigma){
   const r = Math.max(1, Math.ceil(sigma*2.5));
   const k = gaussianKernel1D(sigma, r);
   const tmp = new Float32Array(w*h);
   const dst = new Float32Array(w*h);
 
+  // horizontal
   for(let y=0;y<h;y++){
     const row = y*w;
     for(let x=0;x<w;x++){
@@ -364,6 +431,7 @@ function gaussianBlurSep(src,w,h,sigma){
       tmp[row+x]=sum;
     }
   }
+  // vertical
   for(let x=0;x<w;x++){
     for(let y=0;y<h;y++){
       let sum=0;
@@ -407,7 +475,7 @@ function boxBlur(src,w,h,r){
   return dst;
 }
 
-// ---------- UI wiring ----------
+// ----------------- Main UI wiring -----------------
 input.addEventListener("change", async () => {
   corners = []; picking = false;
   basePoints = []; points = []; history = []; lastWarped = null;
@@ -449,6 +517,7 @@ runBtn.addEventListener("click", () => {
 
   const warped = warpToRect(cSrc, corners, RECT, RECT);
   lastWarped = warped;
+
   cRect.width = RECT; cRect.height = RECT;
   rectCtx.putImageData(warped, 0, 0);
 
@@ -466,7 +535,7 @@ runBtn.addEventListener("click", () => {
   redrawRect();
 });
 
-// ---------- Editing gestures on rect canvas ----------
+// ----------------- Editing gestures on rect canvas -----------------
 const PICK_R = 28;
 let lastTapTime = 0;
 let lastTapPos = null;
@@ -486,7 +555,7 @@ function toggleAt(x,y){
 
 function addManualAt(x,y){
   pushHistory();
-  const dMm = 6.0;
+  const dMm = Math.max(6.0, DMIN_MM());     // default manual size
   const r = (dMm/2) / mmPerPx;
   points.push({x,y,r,dMm,src:"manual",excluded:false});
   setPoints(points);
@@ -498,10 +567,8 @@ function startDragAt(x,y){
   if(idx < 0) return;
   dragging = true;
   dragIdx = idx;
-  // если двигаем auto — пометим как manual (чтобы было честно)
-  if(points[dragIdx].src === "auto"){
-    points[dragIdx].src = "manual";
-  }
+  // если двигаем auto — делаем manual (аудит)
+  if(points[dragIdx].src === "auto") points[dragIdx].src = "manual";
 }
 
 function moveDragTo(x,y){
@@ -590,10 +657,7 @@ cRect.addEventListener("touchend", (ev)=>{
     redrawRect();
     return;
   }
-  // single tap toggle: сделаем на touchend (если это не был double, он обработался в touchstart)
-  const now = Date.now();
-  // если был double tap — уже добавили manual, ничего не делаем
-  if(now - lastTapTime < 120) return;
+  // single tap toggle делаем не здесь, а через mouse/click; на iOS single tap обычно сработает как “клик”
 }, {passive:false});
 
 // Buttons
@@ -618,23 +682,33 @@ resetEditsBtn.addEventListener("click", ()=>{
 });
 exportBtn.addEventListener("click", ()=>{
   const payload = {
-    version: "A1.7",
+    version: "A1.8",
     frame_mm: FRAME_MM,
     rect_px: RECT,
     mm_per_px: mmPerPx,
-    dmin_mm: DMIN_MM,
-    dmax_mm: DMAX_MM,
+    min_mm: DMIN_MM(),
+    detect_max_mm: DMAX_DETECT_MM,
     sensitivity: parseInt(sens.value,10),
     points: points
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "mwc_a1_7_points.json";
+  a.download = "mwc_a1_8_points.json";
+  a.click();
+});
+savePngBtn.addEventListener("click", ()=>{
+  if(!lastWarped) return;
+  // уже отрисовано на cRect, просто сохраняем canvas как PNG
+  const a = document.createElement("a");
+  a.href = cRect.toDataURL("image/png");
+  a.download = "mwc_a1_8_marked.png";
   a.click();
 });
 
 // init
+sensVal.textContent = sens.value;
+minmmVal.textContent = Number(minmm.value).toFixed(1);
 updateUI();
 </script>
 </body>
