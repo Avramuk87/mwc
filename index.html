@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 FINAL PRO v2</title>
+<title>MWC — A1.6 FINAL PRO v3</title>
 <meta name="theme-color" content="#111">
 <style>
 body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -25,9 +25,9 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 </head>
 
 <body>
-<h1>MWC — A1.6 FINAL PRO v2</h1>
+<h1>MWC — A1.6 FINAL PRO v3</h1>
 <div class="small">
-🟢 = пины <b>4–12 мм</b> (в рост) • 🟡 = <b>&lt;4 мм</b> (мелочь)<br>
+🟢 = пины <b>4–12 мм</b> (в рост) • 🟡 = <b>2–4 мм</b> (мелочь, но не мусор)<br>
 Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>
 </div>
 
@@ -52,7 +52,7 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 <div class="card">
   <b>Распремлённая рамка (800×800)</b>
   <canvas id="rect"></canvas>
-  <div class="small">🟢 4–12 мм • 🟡 &lt;4 мм</div>
+  <div class="small">🟢 4–12 мм • 🟡 2–4 мм</div>
 </div>
 
 <script>
@@ -70,8 +70,8 @@ let imgObj = null;
 let picking = false;
 let corners = [];
 
-const RECT = 800;       // px
-const FRAME_MM = 200;   // 20×20 см
+const RECT = 800;
+const FRAME_MM = 200;
 const mmPerPx = FRAME_MM / RECT;
 
 function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
@@ -127,17 +127,18 @@ runBtn.addEventListener("click", () => {
   const {small, grow} = analyzeRectPRO(warped, RECT, RECT);
 
   rectCtx.putImageData(warped, 0, 0);
-
   rectCtx.lineWidth = 3;
 
-  rectCtx.strokeStyle = "#ffd400"; // yellow
+  // small (2–4mm) yellow
+  rectCtx.strokeStyle = "#ffd400";
   for (const p of small){
     rectCtx.beginPath();
     rectCtx.arc(p.cx, p.cy, Math.max(5, p.dPx/2), 0, Math.PI*2);
     rectCtx.stroke();
   }
 
-  rectCtx.strokeStyle = "#00ff00"; // green
+  // grow (4–12mm) green
+  rectCtx.strokeStyle = "#00ff00";
   let sum = 0;
   for (const p of grow){
     sum += p.dMm;
@@ -148,7 +149,7 @@ runBtn.addEventListener("click", () => {
 
   const avg = grow.length ? (sum/grow.length).toFixed(1) : "0.0";
   setOut(
-    `Пины <4 мм (мелочь): ${small.length}\n`+
+    `Пины 2–4 мм (мелочь): ${small.length}\n`+
     `Пины 4–12 мм (в рост): ${grow.length}\n`+
     `Средний диаметр (в рост): ${avg} мм\n`+
     `Масштаб: ${mmPerPx.toFixed(4)} мм/px`,
@@ -165,7 +166,6 @@ function fileToImg(f){
     i.src = URL.createObjectURL(f);
   });
 }
-
 function drawSource(){
   const maxW = 1100;
   const sc = Math.min(1, maxW / imgObj.naturalWidth);
@@ -244,7 +244,7 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ---------- analysis (PRO dual-threshold) ----------
+// ---------- analysis (PRO v3 anti-noise) ----------
 function analyzeRectPRO(imageData, w, h){
   const d=imageData.data;
   const gray=new Float32Array(w*h);
@@ -252,11 +252,13 @@ function analyzeRectPRO(imageData, w, h){
 
   const bg = boxBlur(gray,w,h,18);
 
-  // v2 tweaks:
-  const T1 = 12;  // strict for bright points
-  const T2 = 4;   // ✅ softer for darker 4–7mm pins (was 7)
-  const MIN_AREA = 14;
-  const MIN_CIRC = 0.16; // ✅ softer shape (was 0.20)
+  const T1 = 12;
+  const T2 = 8;        // ✅ back to safer value
+  const MIN_AREA = 16;
+  const MIN_CIRC = 0.20;
+
+  // hard anti-noise: ignore <2mm completely
+  const MIN_MM_NOISE = 2.0;
 
   let bin1=new Uint8Array(w*h);
   let bin2=new Uint8Array(w*h);
@@ -269,27 +271,27 @@ function analyzeRectPRO(imageData, w, h){
   bin1 = close(bin1,w,h);
   bin2 = close(bin2,w,h);
 
-  const cand1 = components(bin1,w,h);
-  const cand2 = components(bin2,w,h);
-
   const circles = [];
-  for (const c of cand1.concat(cand2)){
+  for (const c of components(bin1,w,h).concat(components(bin2,w,h))){
     if(c.area < MIN_AREA) continue;
     const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
     if(circ < MIN_CIRC) continue;
+
     const dPx=2*Math.sqrt(c.area/Math.PI);
     const dMm=dPx*mmPerPx;
+
+    if(dMm < MIN_MM_NOISE) continue; // ✅ убрали мицелий/шум
+
     circles.push({cx:c.cx, cy:c.cy, dPx, dMm});
   }
 
-  // ✅ less aggressive merge (was 10px)
-  const merged = mergeClose(circles, 6);
+  const merged = mergeClose(circles, 9); // ✅ moderate merge
 
   const small = [];
   const grow  = [];
   for(const p of merged){
-    if(p.dMm < 4) small.push(p);
-    else if(p.dMm <= 12) grow.push(p);
+    if(p.dMm >= 2 && p.dMm < 4) small.push(p);
+    else if(p.dMm >= 4 && p.dMm <= 12) grow.push(p);
   }
   return {small, grow};
 }
@@ -301,7 +303,6 @@ function mergeClose(list, distPx){
     if(used[i]) continue;
     let best=list[i];
     used[i]=1;
-
     for(let j=i+1;j<list.length;j++){
       if(used[j]) continue;
       const dx=list[j].cx-best.cx, dy=list[j].cy-best.cy;
