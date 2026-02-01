@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 BLOB FINAL</title>
+<title>MWC — A1.7 BLOB FINAL + Edit</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -16,7 +16,7 @@
   input[type="file"]{width:100%;margin:8px 0}
   input[type="range"]{width:100%}
   pre{white-space:pre-wrap;margin:0}
-  canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipulation}
+  canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:none}
   .ok{color:#0a7;font-weight:700}
   .bad{color:#c00;font-weight:700}
   .warn{color:#c90;font-weight:700}
@@ -27,10 +27,11 @@
 </head>
 
 <body>
-<h1>MWC — A1.6 BLOB FINAL (только 4–12 мм)</h1>
+<h1>MWC — A1.7 BLOB FINAL (4–12 мм) + корректировка</h1>
 <div class="small">
 Метод: DoG blob detection (устойчив к текстуре/мицелию).<br>
-Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>. Считаем только <b>4–12 мм</b> (в рост).
+Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>. Считаем только <b>4–12 мм</b> (в рост).<br>
+<b>Редактирование:</b> Tap=toggle • DoubleTap=add • Hold+Drag=move
 </div>
 
 <div class="card">
@@ -59,7 +60,16 @@
 <div class="card">
   <b>Распремлённая рамка (800×800)</b>
   <canvas id="rect"></canvas>
-  <div class="small">🟢 — найденные пины 4–12 мм</div>
+  <div class="row">
+    <button id="undo" class="secondary" disabled>Undo</button>
+    <button id="clearManual" class="secondary" disabled>Очистить manual</button>
+    <button id="resetEdits" class="secondary" disabled>Сброс правок</button>
+  </div>
+  <div class="row">
+    <button id="export" class="secondary" disabled>Экспорт JSON</button>
+  </div>
+  <div class="small kv" id="editHint">Tap=toggle • DoubleTap=add • Hold+Drag=move</div>
+  <div class="small">🟢 auto • 🟡 manual • 🔴 excluded</div>
 </div>
 
 <script>
@@ -75,21 +85,25 @@ const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
 const sens = document.getElementById("sens");
 const sensVal = document.getElementById("sensVal");
 
+const undoBtn = document.getElementById("undo");
+const clearManualBtn = document.getElementById("clearManual");
+const resetEditsBtn = document.getElementById("resetEdits");
+const exportBtn = document.getElementById("export");
+
 sens.addEventListener("input", ()=> sensVal.textContent = sens.value);
 
 let imgObj = null;
 let picking = false;
 let corners = [];
 
+// ---------- constants ----------
 const RECT = 800;
 const FRAME_MM = 200;
 const mmPerPx = FRAME_MM / RECT;      // 0.25 мм/px
 
-// Диапазон по мм (только рост)
 const DMIN_MM = 4.0;
 const DMAX_MM = 12.0;
 
-// Конвертация в радиусы в пикселях
 function rpxFromMm(dmm){ return (dmm/2) / mmPerPx; }
 const RMIN = rpxFromMm(DMIN_MM); // ~8 px
 const RMAX = rpxFromMm(DMAX_MM); // ~24 px
@@ -103,69 +117,84 @@ function updateUI(){
   else hint.textContent = "Готово. Нажми «Анализ».";
 }
 
-input.addEventListener("change", async () => {
-  corners = []; picking = false;
-  try{
-    imgObj = await fileToImg(input.files[0]);
-    drawSource();
-    setOut("Фото загружено. Выбери 4 угла рамки.", "warn");
-  }catch(e){
-    imgObj = null;
-    setOut("Ошибка загрузки фото.", "bad");
+// ----------------- EDIT STATE (A1.7) -----------------
+let points = [];        // (auto + manual) с excluded
+let basePoints = [];    // чистый DoG результат
+let history = [];       // undo stack
+let lastWarped = null;  // фон для перерисовки
+
+function clonePts(arr){ return arr.map(p => ({...p})); }
+
+function pushHistory(){
+  history.push(JSON.stringify(points));
+  if(history.length > 60) history.shift();
+  undoBtn.disabled = history.length === 0;
+}
+
+function setPoints(newPts){
+  points = newPts;
+  undoBtn.disabled = history.length === 0;
+  clearManualBtn.disabled = points.filter(p=>p.src==="manual").length === 0;
+  resetEditsBtn.disabled = basePoints.length === 0;
+  exportBtn.disabled = points.length === 0;
+}
+
+function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
+
+function nearestPoint(x,y, maxPx=28){
+  let best = null;
+  const p0 = {x,y};
+  const max2 = maxPx*maxPx;
+  for(let i=0;i<points.length;i++){
+    const p = points[i];
+    const d = dist2(p, p0);
+    if(d <= max2 && (!best || d < best.d2)) best = {i, d2:d};
   }
-  updateUI();
-});
+  return best ? best.i : -1;
+}
 
-pickBtn.addEventListener("click", () => {
-  corners = []; picking = true;
-  setOut("Ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН).", "warn");
-  drawSource(); updateUI();
-});
-
-cSrc.addEventListener("click", (ev) => {
-  if (!picking) return;
-  const r = cSrc.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (cSrc.width  / r.width);
-  const y = (ev.clientY - r.top)  * (cSrc.height / r.height);
-  corners.push({x,y});
-  drawSource();
-  if (corners.length === 4){
-    picking = false;
-    setOut("Углы выбраны. Нажми «Анализ».", "ok");
+function countInRange(){
+  let n=0,sum=0;
+  for(const p of points){
+    if(p.excluded) continue;
+    if(p.dMm < DMIN_MM || p.dMm > DMAX_MM) continue;
+    n++; sum += p.dMm;
   }
-  updateUI();
-});
+  return {n, avg: n? (sum/n):0};
+}
 
-runBtn.addEventListener("click", () => {
-  if (!imgObj || corners.length !== 4) return;
+function redrawRect(){
+  if(!lastWarped) return;
+  rectCtx.putImageData(lastWarped, 0, 0);
 
-  setOut("Распремление и blob-анализ…", "warn");
+  for(const p of points){
+    const active = !p.excluded;
+    const isManual = p.src === "manual";
+    rectCtx.lineWidth = 3;
 
-  const warped = warpToRect(cSrc, corners, RECT, RECT);
-  cRect.width = RECT; cRect.height = RECT;
-  rectCtx.putImageData(warped, 0, 0);
+    if(!active) rectCtx.strokeStyle = "#ff3333";
+    else if(isManual) rectCtx.strokeStyle = "#ffd400";
+    else rectCtx.strokeStyle = "#00ff00";
 
-  const s = parseInt(sens.value,10); // 1..20
-  const result = detectBlobsDoG(warped, RECT, RECT, s);
-
-  // draw
-  rectCtx.putImageData(warped, 0, 0);
-  rectCtx.lineWidth = 3;
-  rectCtx.strokeStyle = "#00ff00";
-  let sum=0;
-  for(const p of result){
-    sum += p.dMm;
     rectCtx.beginPath();
     rectCtx.arc(p.x, p.y, Math.max(6, p.r), 0, Math.PI*2);
     rectCtx.stroke();
   }
-  const n = result.length;
-  const avg = n ? (sum/n).toFixed(1) : "0.0";
+
+  const {n, avg} = countInRange();
+  const s = parseInt(sens.value,10);
   setOut(
-    `Пины 4–12 мм (в рост): ${n}\nСредний диаметр: ${avg} мм\nSensitivity: ${s}\nМасштаб: ${mmPerPx.toFixed(4)} мм/px`,
+    `Пины 4–12 мм (в рост): ${n}\nСредний диаметр: ${avg.toFixed(1)} мм\nSensitivity: ${s}\nМасштаб: ${mmPerPx.toFixed(4)} мм/px\nПравки: manual=${points.filter(p=>p.src==="manual").length}, excluded=${points.filter(p=>p.excluded).length}`,
     n ? "ok" : "bad"
   );
-});
+}
+
+function canvasXY(ev, canvas){
+  const r = canvas.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (canvas.width  / r.width);
+  const y = (ev.clientY - r.top)  * (canvas.height / r.height);
+  return {x,y};
+}
 
 // ---------- image helpers ----------
 function fileToImg(f){
@@ -257,48 +286,37 @@ function solve8(A,b){
 
 // ---------- DoG blob detection ----------
 function detectBlobsDoG(imageData, w, h, sensitivity){
-  // sensitivity: 1..20 -> threshold
-  // lower sensitivity => higher threshold (stricter)
   const thr = 18 - sensitivity*0.7; // ~17.3 .. ~4
   const thr2 = Math.max(3, thr);
 
-  // grayscale float
   const d = imageData.data;
   const g = new Float32Array(w*h);
   for(let i=0;i<w*h;i++){
     g[i] = 0.2126*d[i*4] + 0.7152*d[i*4+1] + 0.0722*d[i*4+2];
   }
 
-  // normalize contrast a bit (remove slow background)
   const bg = boxBlur(g,w,h,18);
-  for(let i=0;i<w*h;i++) g[i] = g[i] - bg[i]; // now local contrast
+  for(let i=0;i<w*h;i++) g[i] = g[i] - bg[i];
 
-  // scales: radii from RMIN..RMAX
-  // sigma ~ r / sqrt(2)
   const sigmas = [];
   for(let r=RMIN; r<=RMAX; r*=1.18){
     sigmas.push(r/1.4142);
   }
 
-  // compute blurred images for each sigma
   const blurs = sigmas.map(s => gaussianBlurSep(g,w,h,s));
 
-  // DoG responses
   const candidates = [];
   for(let k=0;k<blurs.length-1;k++){
     const a = blurs[k], b2 = blurs[k+1];
     const dog = new Float32Array(w*h);
     for(let i=0;i<w*h;i++) dog[i] = a[i] - b2[i];
 
-    // local maxima (3x3) above threshold
-    // Use k scale radius approx
     const r = sigmas[k]*1.4142;
     for(let y=1;y<h-1;y++){
       for(let x=1;x<w-1;x++){
         const idx = y*w + x;
         const v = dog[idx];
         if(v < thr2) continue;
-        // local max
         if(v < dog[idx-1] || v < dog[idx+1] || v < dog[idx-w] || v < dog[idx+w]) continue;
         if(v < dog[idx-w-1] || v < dog[idx-w+1] || v < dog[idx+w-1] || v < dog[idx+w+1]) continue;
         candidates.push({x,y,score:v,r});
@@ -306,34 +324,25 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
     }
   }
 
-  // sort by score desc and do non-maximum suppression in space
   candidates.sort((p,q)=>q.score-p.score);
   const kept = [];
-  const minDist = 10; // px
+  const minDist = 10;
   const minDist2 = minDist*minDist;
 
   for(const c of candidates){
     let ok = true;
     for(const k of kept){
       const dx=c.x-k.x, dy=c.y-k.y;
-      if(dx*dx+dy*dy < minDist2){
-        ok=false; break;
-      }
+      if(dx*dx+dy*dy < minDist2){ ok=false; break; }
     }
     if(!ok) continue;
 
-    // size filter in mm
     const dMm = (2*c.r) * mmPerPx;
     if(dMm < DMIN_MM || dMm > DMAX_MM) continue;
 
-    kept.push({
-      x:c.x, y:c.y,
-      r: c.r,
-      dMm
-    });
-    if(kept.length > 250) break; // safety
+    kept.push({ x:c.x, y:c.y, r:c.r, dMm });
+    if(kept.length > 250) break;
   }
-
   return kept;
 }
 
@@ -344,7 +353,6 @@ function gaussianBlurSep(src,w,h,sigma){
   const tmp = new Float32Array(w*h);
   const dst = new Float32Array(w*h);
 
-  // horizontal
   for(let y=0;y<h;y++){
     const row = y*w;
     for(let x=0;x<w;x++){
@@ -356,7 +364,6 @@ function gaussianBlurSep(src,w,h,sigma){
       tmp[row+x]=sum;
     }
   }
-  // vertical
   for(let x=0;x<w;x++){
     for(let y=0;y<h;y++){
       let sum=0;
@@ -399,6 +406,236 @@ function boxBlur(src,w,h,r){
   }
   return dst;
 }
+
+// ---------- UI wiring ----------
+input.addEventListener("change", async () => {
+  corners = []; picking = false;
+  basePoints = []; points = []; history = []; lastWarped = null;
+  try{
+    imgObj = await fileToImg(input.files[0]);
+    drawSource();
+    setOut("Фото загружено. Выбери 4 угла рамки.", "warn");
+  }catch(e){
+    imgObj = null;
+    setOut("Ошибка загрузки фото.", "bad");
+  }
+  updateUI();
+});
+
+pickBtn.addEventListener("click", () => {
+  corners = []; picking = true;
+  setOut("Ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН).", "warn");
+  drawSource(); updateUI();
+});
+
+cSrc.addEventListener("click", (ev) => {
+  if (!picking) return;
+  const r = cSrc.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (cSrc.width  / r.width);
+  const y = (ev.clientY - r.top)  * (cSrc.height / r.height);
+  corners.push({x,y});
+  drawSource();
+  if (corners.length === 4){
+    picking = false;
+    setOut("Углы выбраны. Нажми «Анализ».", "ok");
+  }
+  updateUI();
+});
+
+runBtn.addEventListener("click", () => {
+  if (!imgObj || corners.length !== 4) return;
+
+  setOut("Распремление и blob-анализ…", "warn");
+
+  const warped = warpToRect(cSrc, corners, RECT, RECT);
+  lastWarped = warped;
+  cRect.width = RECT; cRect.height = RECT;
+  rectCtx.putImageData(warped, 0, 0);
+
+  const s = parseInt(sens.value,10);
+  const result = detectBlobsDoG(warped, RECT, RECT, s);
+
+  basePoints = result.map(p => ({
+    x:p.x, y:p.y, r:p.r, dMm:p.dMm,
+    src:"auto",
+    excluded:false
+  }));
+
+  history = [];
+  setPoints(clonePts(basePoints));
+  redrawRect();
+});
+
+// ---------- Editing gestures on rect canvas ----------
+const PICK_R = 28;
+let lastTapTime = 0;
+let lastTapPos = null;
+
+let dragging = false;
+let dragIdx = -1;
+let pressTimer = null;
+
+function toggleAt(x,y){
+  const idx = nearestPoint(x,y,PICK_R);
+  if(idx < 0) return;
+  pushHistory();
+  points[idx].excluded = !points[idx].excluded;
+  setPoints(points);
+  redrawRect();
+}
+
+function addManualAt(x,y){
+  pushHistory();
+  const dMm = 6.0;
+  const r = (dMm/2) / mmPerPx;
+  points.push({x,y,r,dMm,src:"manual",excluded:false});
+  setPoints(points);
+  redrawRect();
+}
+
+function startDragAt(x,y){
+  const idx = nearestPoint(x,y,PICK_R);
+  if(idx < 0) return;
+  dragging = true;
+  dragIdx = idx;
+  // если двигаем auto — пометим как manual (чтобы было честно)
+  if(points[dragIdx].src === "auto"){
+    points[dragIdx].src = "manual";
+  }
+}
+
+function moveDragTo(x,y){
+  if(!dragging || dragIdx<0) return;
+  points[dragIdx].x = x;
+  points[dragIdx].y = y;
+  redrawRect();
+}
+
+function endDrag(){
+  dragging = false; dragIdx = -1;
+}
+
+// Desktop mouse
+cRect.addEventListener("mousedown", (ev)=>{
+  if(!lastWarped) return;
+  const p = canvasXY(ev, cRect);
+  pressTimer = setTimeout(()=>{
+    pushHistory();
+    startDragAt(p.x,p.y);
+  }, 180);
+});
+cRect.addEventListener("mousemove", (ev)=>{
+  if(!lastWarped) return;
+  const p = canvasXY(ev, cRect);
+  if(dragging) moveDragTo(p.x,p.y);
+});
+cRect.addEventListener("mouseup", (ev)=>{
+  if(!lastWarped) return;
+  clearTimeout(pressTimer);
+  const p = canvasXY(ev, cRect);
+
+  if(dragging){
+    endDrag();
+    setPoints(points);
+    redrawRect();
+    return;
+  }
+
+  const now = Date.now();
+  const isDouble = (now - lastTapTime) < 260 && lastTapPos && dist2(lastTapPos, p) < 18*18;
+  lastTapTime = now; lastTapPos = p;
+
+  if(isDouble) addManualAt(p.x,p.y);
+  else toggleAt(p.x,p.y);
+});
+
+// iOS touch
+cRect.addEventListener("touchstart", (ev)=>{
+  if(!lastWarped) return;
+  ev.preventDefault();
+  const t = ev.touches[0];
+  const p = canvasXY(t, cRect);
+
+  pressTimer = setTimeout(()=>{
+    pushHistory();
+    startDragAt(p.x,p.y);
+  }, 180);
+
+  const now = Date.now();
+  const isDouble = (now - lastTapTime) < 260 && lastTapPos && dist2(lastTapPos, p) < 18*18;
+  lastTapTime = now; lastTapPos = p;
+
+  if(isDouble){
+    clearTimeout(pressTimer);
+    addManualAt(p.x,p.y);
+  }
+}, {passive:false});
+
+cRect.addEventListener("touchmove", (ev)=>{
+  if(!lastWarped) return;
+  ev.preventDefault();
+  const t = ev.touches[0];
+  const p = canvasXY(t, cRect);
+  if(dragging) moveDragTo(p.x,p.y);
+}, {passive:false});
+
+cRect.addEventListener("touchend", (ev)=>{
+  if(!lastWarped) return;
+  ev.preventDefault();
+  clearTimeout(pressTimer);
+
+  if(dragging){
+    endDrag();
+    setPoints(points);
+    redrawRect();
+    return;
+  }
+  // single tap toggle: сделаем на touchend (если это не был double, он обработался в touchstart)
+  const now = Date.now();
+  // если был double tap — уже добавили manual, ничего не делаем
+  if(now - lastTapTime < 120) return;
+}, {passive:false});
+
+// Buttons
+undoBtn.addEventListener("click", ()=>{
+  if(!history.length) return;
+  const prev = history.pop();
+  points = JSON.parse(prev);
+  setPoints(points);
+  redrawRect();
+});
+clearManualBtn.addEventListener("click", ()=>{
+  if(!points.length) return;
+  pushHistory();
+  points = points.filter(p => p.src !== "manual");
+  setPoints(points);
+  redrawRect();
+});
+resetEditsBtn.addEventListener("click", ()=>{
+  history = [];
+  setPoints(clonePts(basePoints));
+  redrawRect();
+});
+exportBtn.addEventListener("click", ()=>{
+  const payload = {
+    version: "A1.7",
+    frame_mm: FRAME_MM,
+    rect_px: RECT,
+    mm_per_px: mmPerPx,
+    dmin_mm: DMIN_MM,
+    dmax_mm: DMAX_MM,
+    sensitivity: parseInt(sens.value,10),
+    points: points
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "mwc_a1_7_points.json";
+  a.click();
+});
+
+// init
+updateUI();
 </script>
 </body>
 </html>
