@@ -2,351 +2,296 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MWC — A1.7.1 (пины >4 мм)</title>
-
-<script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
-
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MWC — A1.6 FINAL</title>
+<meta name="theme-color" content="#111">
 <style>
-  body{font-family:-apple-system,system-ui,Arial;margin:16px}
-  h1{font-size:22px;margin:0 0 6px}
-  .small{color:#666;font-size:13px;margin:6px 0}
-  .card{border:1px solid #ddd;border-radius:14px;padding:14px;margin:14px 0}
-  button{width:100%;padding:14px;border-radius:12px;border:none;background:#000;color:#fff;font-weight:800;font-size:16px}
-  button:disabled{opacity:.4}
-  canvas{max-width:100%;border-radius:12px;margin-top:12px;border:1px solid #ddd}
-  .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-  label{display:block;font-size:13px;color:#333;font-weight:700;margin-top:8px}
-  input[type="number"], input[type="range"]{width:100%}
-  .ok{color:#0a7;font-weight:800}
-  .bad{color:#c00;font-weight:800}
-  .warn{color:#c90;font-weight:800}
-  .kv{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#333}
+body{font-family:-apple-system,system-ui,Arial;margin:16px}
+h1{font-size:20px;margin:0 0 8px}
+.small{font-size:13px;color:#555;margin:6px 0}
+.card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
+button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:800}
+button.secondary{background:#fff;color:#111}
+button:disabled{opacity:.45}
+input{width:100%;margin:8px 0}
+pre{white-space:pre-wrap;margin:0}
+canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipulation}
+.ok{color:#0a7;font-weight:700}
+.bad{color:#c00;font-weight:700}
+.warn{color:#c90;font-weight:700}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+.row > button{flex:1;min-width:160px}
 </style>
 </head>
 
 <body>
-<h1>MWC — A1.7.1 (пины &gt;4 мм)</h1>
+<h1>MWC — A1.6 FINAL (пины 4–12 мм)</h1>
 <div class="small">
-Рамка 20×20 см должна быть целиком в кадре. Свет — без бликов по возможности.
+Шаги: 1) выбери фото → 2) ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН) → 3) Анализ.
 </div>
 
 <div class="card">
-  <input type="file" id="file" accept="image/*">
-  <button id="analyze" disabled>АНАЛИЗ</button>
-  <div id="status" class="small">Загрузи фото</div>
-</div>
-
-<div class="card">
-  <b>Настройки (подкрутка под твой свет)</b>
-
-  <div class="row3">
-    <div>
-      <label>Порог: blockSize (нечётное 11–51)</label>
-      <input id="blockSize" type="number" min="11" max="51" step="2" value="21">
-      <div class="small">Больше = мягче к теням, но может ловить мусор</div>
-    </div>
-    <div>
-      <label>Порог: C (чувствительность)</label>
-      <input id="Cval" type="number" min="-20" max="20" step="1" value="-5">
-      <div class="small">Меньше (например -8) = больше белого (чувствительнее)</div>
-    </div>
-    <div>
-      <label>minArea (отсечь мусор)</label>
-      <input id="minArea" type="number" min="5" max="500" step="1" value="35">
-      <div class="small">Если ловит мицелий — увеличь (например 60–120)</div>
-    </div>
+  <b>Фото</b>
+  <input id="img" type="file" accept="image/*">
+  <div class="row">
+    <button id="pick" class="secondary" disabled>Выбрать 4 угла</button>
+    <button id="run" disabled>Анализ</button>
   </div>
+  <div class="small" id="hint">Выбери фото.</div>
+</div>
 
-  <div class="row3">
-    <div>
-      <label>minCircularity (форма)</label>
-      <input id="minCirc" type="number" min="0.30" max="0.95" step="0.01" value="0.60">
-      <div class="small">Если пропускает пины — уменьшай до 0.50</div>
-    </div>
-    <div>
-      <label>Диаметр min, мм</label>
-      <input id="dMin" type="number" min="1" max="10" step="0.5" value="4">
-    </div>
-    <div>
-      <label>Диаметр max, мм</label>
-      <input id="dMax" type="number" min="6" max="30" step="1" value="12">
-      <div class="small">Чтобы не считать грибы — держи 10–14</div>
-    </div>
-  </div>
+<div class="card"><pre id="out">Загрузи фото.</pre></div>
 
-  <div class="small">
-    Быстрые подсказки:
-    <ul>
-      <li>Мало находит → C сделай более отрицательным (например -8) и/или minCirc снизь до 0.50</li>
-      <li>Много мусора → minArea ↑ (60–150) и/или minCirc ↑ (0.65)</li>
-      <li>Считает большие грибы → dMax ↓ (например 10–11)</li>
-    </ul>
-  </div>
+<div class="card">
+  <b>Исходное фото (выбор углов)</b>
+  <canvas id="src"></canvas>
+  <div class="small">Порядок: 1) ЛВ  2) ПВ  3) ПН  4) ЛН</div>
 </div>
 
 <div class="card">
-  <b>Результат</b>
-  <div id="result" class="kv">—</div>
-</div>
-
-<div class="card">
-  <b>Разметка</b>
-  <div class="small">Красным — найденная рамка. Зелёным — засчитанные пины.</div>
-  <canvas id="canvas"></canvas>
+  <b>Распремлённая рамка (800×800)</b>
+  <canvas id="rect"></canvas>
+  <div class="small">🟢 — засчитанные пины 4–12 мм</div>
 </div>
 
 <script>
-let img = new Image();
-let canvas = document.getElementById('canvas');
-let ctx = canvas.getContext('2d');
+const input = document.getElementById("img");
+const pickBtn = document.getElementById("pick");
+const runBtn  = document.getElementById("run");
+const hint = document.getElementById("hint");
+const out  = document.getElementById("out");
+const cSrc = document.getElementById("src");
+const cRect= document.getElementById("rect");
+const srcCtx = cSrc.getContext("2d", { willReadFrequently:true });
+const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
 
-const statusEl = document.getElementById('status');
-const resEl = document.getElementById('result');
-const btn = document.getElementById('analyze');
+let imgObj = null;
+let picking = false;
+let corners = [];
 
-file.onchange = e => {
-  const f = e.target.files[0];
-  if(!f) return;
-  img.onload = () => {
-    canvas.width = img.width;
-    canvas.height = img.height;
-    ctx.drawImage(img,0,0);
-    btn.disabled = false;
-    statusEl.textContent = "Фото загружено. Нажми «АНАЛИЗ»";
-  };
-  img.src = URL.createObjectURL(f);
-};
+const RECT = 800;       // px
+const FRAME_MM = 200;  // 20×20 см
+const mmPerPx = FRAME_MM / RECT; // точный масштаб
 
-function waitCV(){
-  return new Promise(r=>{
-    let tries=0;
-    let t=setInterval(()=>{
-      tries++;
-      if(window.cv && cv.imread){clearInterval(t);r(true);}
-      if(tries>250){clearInterval(t);r(false);} // ~50 сек
-    },200);
+function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
+function updateUI(){
+  pickBtn.disabled = !imgObj;
+  runBtn.disabled = !(imgObj && corners.length === 4);
+  if (!imgObj) hint.textContent = "Выбери фото.";
+  else if (corners.length < 4) hint.textContent = "Нажми «Выбрать 4 угла» и ткни 4 угла.";
+  else hint.textContent = "Готово. Нажми «Анализ».";
+}
+
+input.addEventListener("change", async () => {
+  corners = []; picking = false;
+  try{
+    imgObj = await fileToImg(input.files[0]);
+    drawSource();
+    setOut("Фото загружено. Выбери 4 угла рамки.", "warn");
+  }catch(e){
+    imgObj = null;
+    setOut("Ошибка загрузки фото.", "bad");
+  }
+  updateUI();
+});
+
+pickBtn.addEventListener("click", () => {
+  corners = []; picking = true;
+  setOut("Ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН).", "warn");
+  drawSource(); updateUI();
+});
+
+cSrc.addEventListener("click", (ev) => {
+  if (!picking) return;
+  const r = cSrc.getBoundingClientRect();
+  const x = (ev.clientX - r.left) * (cSrc.width  / r.width);
+  const y = (ev.clientY - r.top)  * (cSrc.height / r.height);
+  corners.push({x,y});
+  drawSource();
+  if (corners.length === 4){
+    picking = false;
+    setOut("Углы выбраны. Нажми «Анализ».", "ok");
+  }
+  updateUI();
+});
+
+runBtn.addEventListener("click", () => {
+  if (!imgObj || corners.length !== 4) return;
+  setOut("Распремление и анализ…", "warn");
+
+  // 1) Warp
+  const warped = warpToRect(cSrc, corners, RECT, RECT);
+  cRect.width = RECT; cRect.height = RECT;
+  rectCtx.putImageData(warped, 0, 0);
+
+  // 2) Analyze
+  const res = analyzeRect(warped, RECT, RECT);
+
+  // draw result
+  rectCtx.putImageData(warped, 0, 0);
+  rectCtx.lineWidth = 3;
+  rectCtx.strokeStyle = "#00ff00";
+  let sum = 0;
+  for (const p of res){
+    sum += p.dMm;
+    rectCtx.beginPath();
+    rectCtx.arc(p.cx, p.cy, Math.max(6, p.dPx/2), 0, Math.PI*2);
+    rectCtx.stroke();
+  }
+
+  const n = res.length;
+  const avg = n ? (sum/n).toFixed(1) : "0.0";
+  setOut(`Пинов 4–12 мм: ${n}\nСредний диаметр: ${avg} мм\nМасштаб: ${mmPerPx.toFixed(4)} мм/px`, n?"ok":"bad");
+});
+
+// ---------- helpers ----------
+function fileToImg(f){
+  return new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = URL.createObjectURL(f);
   });
 }
 
-function ensureOdd(n){
-  n = Math.max(11, Math.min(51, n|0));
-  if(n%2===0) n+=1;
-  return n;
-}
+function drawSource(){
+  const maxW = 1100;
+  const sc = Math.min(1, maxW / imgObj.naturalWidth);
+  const w = Math.round(imgObj.naturalWidth * sc);
+  const h = Math.round(imgObj.naturalHeight * sc);
+  cSrc.width = w; cSrc.height = h;
+  srcCtx.drawImage(imgObj, 0, 0, w, h);
 
-// Пытаемся найти рамку как 4-угольник максимальной площади
-function findFrameQuad(edges, srcW, srcH){
-  let contours = new cv.MatVector();
-  let hier = new cv.Mat();
-  cv.findContours(edges, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-  let best = null;
-  let bestArea = 0;
-
-  for(let i=0;i<contours.size();i++){
-    let c = contours.get(i);
-    const area = cv.contourArea(c);
-    if(area < (srcW*srcH*0.08)) continue; // мелочь
-
-    let peri = cv.arcLength(c, true);
-    let approx = new cv.Mat();
-    cv.approxPolyDP(c, approx, 0.02*peri, true);
-
-    if(approx.rows === 4){
-      // Проверим, что контур выпуклый
-      if(!cv.isContourConvex(approx)) { approx.delete(); continue; }
-
-      if(area > bestArea){
-        if(best) best.delete();
-        best = approx;
-        bestArea = area;
-      } else {
-        approx.delete();
-      }
-    } else {
-      approx.delete();
+  if (corners.length){
+    srcCtx.lineWidth = 4;
+    srcCtx.strokeStyle = "#00ff00";
+    srcCtx.fillStyle = "#00ff00";
+    srcCtx.font = "20px system-ui";
+    corners.forEach((p,i)=>{
+      srcCtx.beginPath(); srcCtx.arc(p.x,p.y,8,0,Math.PI*2); srcCtx.fill();
+      srcCtx.fillText(String(i+1), p.x+10, p.y-10);
+    });
+    if (corners.length===4){
+      srcCtx.beginPath();
+      srcCtx.moveTo(corners[0].x,corners[0].y);
+      for(let i=1;i<4;i++) srcCtx.lineTo(corners[i].x,corners[i].y);
+      srcCtx.closePath(); srcCtx.stroke();
     }
   }
-
-  contours.delete(); hier.delete();
-  return best; // Mat Nx1x2, N=4
 }
 
-// упорядочить точки: TL, TR, BR, BL
-function orderQuad(quad){
-  // quad: Mat 4x1x2
-  let pts = [];
+// ---------- perspective warp ----------
+function warpToRect(sourceCanvas, srcPts, dstW, dstH){
+  const dstPts = [{x:0,y:0},{x:dstW-1,y:0},{x:dstW-1,y:dstH-1},{x:0,y:dstH-1}];
+  const H = computeHomography(dstPts, srcPts); // dst -> src
+
+  const sCtx = sourceCanvas.getContext("2d", { willReadFrequently:true });
+  const sW = sourceCanvas.width, sH = sourceCanvas.height;
+  const sData = sCtx.getImageData(0,0,sW,sH).data;
+
+  const out = new ImageData(dstW, dstH);
+  const o = out.data;
+
+  for(let y=0;y<dstH;y++){
+    for(let x=0;x<dstW;x++){
+      const [sx, sy] = applyH(H, x, y);
+      const ix = Math.floor(sx), iy = Math.floor(sy);
+      const di = (y*dstW + x)*4;
+      if (ix>=0 && iy>=0 && ix<sW && iy<sH){
+        const si = (iy*sW + ix)*4;
+        o[di]=sData[si]; o[di+1]=sData[si+1]; o[di+2]=sData[si+2]; o[di+3]=255;
+      } else { o[di]=o[di+1]=o[di+2]=0; o[di+3]=255; }
+    }
+  }
+  return out;
+}
+function applyH(H, x, y){
+  const a = H[0]*x + H[1]*y + H[2];
+  const b = H[3]*x + H[4]*y + H[5];
+  const c = H[6]*x + H[7]*y + H[8];
+  return [a/c, b/c];
+}
+function computeHomography(p, q){
+  const A=[], b=[];
   for(let i=0;i<4;i++){
-    const p = quad.intPtr(i,0);
-    pts.push({x:p[0], y:p[1]});
+    const x=p[i].x, y=p[i].y, u=q[i].x, v=q[i].y;
+    A.push([x,y,1,0,0,0,-x*u,-y*u]); b.push(u);
+    A.push([0,0,0,x,y,1,-x*v,-y*v]); b.push(v);
   }
-
-  // sum and diff method
-  pts.sort((a,b)=> (a.x+a.y)-(b.x+b.y));
-  const tl = pts[0];
-  const br = pts[3];
-
-  const mid = [pts[1], pts[2]];
-  mid.sort((a,b)=> (a.x-a.y)-(b.x-b.y)); // diff
-  const tr = mid[0];
-  const bl = mid[1];
-
-  return [tl,tr,br,bl];
+  const h = solve8(A,b);
+  return [h[0],h[1],h[2], h[3],h[4],h[5], h[6],h[7],1];
+}
+function solve8(A,b){
+  const n=8, M=A.map((r,i)=>r.concat([b[i]]));
+  for(let c=0;c<n;c++){
+    let p=c; for(let r=c+1;r<n;r++) if(Math.abs(M[r][c])>Math.abs(M[p][c])) p=r;
+    [M[c],M[p]]=[M[p],M[c]];
+    const d=M[c][c]||1e-12; for(let j=c;j<=n;j++) M[c][j]/=d;
+    for(let r=0;r<n;r++){ if(r===c) continue; const f=M[r][c]; for(let j=c;j<=n;j++) M[r][j]-=f*M[c][j]; }
+  }
+  return M.map(r=>r[n]);
 }
 
-// оценка pxPerMM по рамке: берём среднюю длину верх/низ и лево/право
-function pxPerMMFromQuad(pts){
-  const dist=(a,b)=> Math.hypot(a.x-b.x, a.y-b.y);
-  const top = dist(pts[0], pts[1]);
-  const bottom = dist(pts[3], pts[2]);
-  const left = dist(pts[0], pts[3]);
-  const right= dist(pts[1], pts[2]);
+// ---------- analysis ----------
+function analyzeRect(imageData, w, h){
+  const d=imageData.data;
+  const gray=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++) gray[i]=0.2126*d[i*4]+0.7152*d[i*4+1]+0.0722*d[i*4+2];
 
-  const w = (top+bottom)/2;
-  const h = (left+right)/2;
+  // local background
+  const bg = boxBlur(gray,w,h,18);
+  let bin=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++) bin[i]=(gray[i]>bg[i]+18)?1:0;
+  bin = erode(dilate(bin,w,h),w,h);
 
-  // рамка 200 мм
-  const pxPerMMw = w/200;
-  const pxPerMMh = h/200;
-  return (pxPerMMw + pxPerMMh)/2;
+  const comps = cc(bin,w,h);
+  const pins=[];
+  for(const c of comps){
+    if(c.area<18) continue;
+    const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
+    if(circ<0.28) continue;
+    const dPx=2*Math.sqrt(c.area/Math.PI);
+    const dMm=dPx*mmPerPx;
+    if(dMm>=4 && dMm<=12) pins.push({cx:c.cx,cy:c.cy,dPx,dMm});
+  }
+  return pins;
 }
-
-btn.onclick = async ()=>{
-  btn.disabled = true;
-  statusEl.textContent = "Жду OpenCV…";
-  const ok = await waitCV();
-  if(!ok){
-    statusEl.innerHTML = "<span class='bad'>OpenCV не загрузился. Обнови страницу и попробуй ещё.</span>";
-    btn.disabled = false; return;
+function boxBlur(src,w,h,r){
+  const dst=new Float32Array(w*h), iw=w+1, integ=new Float32Array((w+1)*(h+1));
+  for(let y=1;y<=h;y++){ let s=0; for(let x=1;x<=w;x++){ s+=src[(y-1)*w+(x-1)]; integ[y*iw+x]=integ[(y-1)*iw+x]+s; } }
+  for(let y=0;y<h;y++){
+    const y0=Math.max(0,y-r), y1=Math.min(h-1,y+r);
+    for(let x=0;x<w;x++){
+      const x0=Math.max(0,x-r), x1=Math.min(w-1,x+r);
+      const A=integ[y0*iw+x0], B=integ[y0*iw+x1+1], C=integ[(y1+1)*iw+x0], D=integ[(y1+1)*iw+x1+1];
+      dst[y*w+x]=(D-B-C+A)/((x1-x0+1)*(y1-y0+1));
+    }
   }
-  statusEl.textContent = "Анализ…";
-
-  // настройки
-  const blockSize = ensureOdd(parseInt(document.getElementById('blockSize').value||21,10));
-  const C = parseInt(document.getElementById('Cval').value||-5,10);
-  const minArea = parseFloat(document.getElementById('minArea').value||35);
-  const minCirc = parseFloat(document.getElementById('minCirc').value||0.60);
-  const dMin = parseFloat(document.getElementById('dMin').value||4);
-  const dMax = parseFloat(document.getElementById('dMax').value||12);
-
-  let src = cv.imread(canvas);
-  let gray = new cv.Mat();
-  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-
-  // edges for frame
-  let gblur = new cv.Mat();
-  cv.GaussianBlur(gray, gblur, new cv.Size(5,5), 0);
-
-  let edges = new cv.Mat();
-  cv.Canny(gblur, edges, 60, 180);
-
-  // find frame quad
-  let quad = findFrameQuad(edges, src.cols, src.rows);
-
-  // рисуем исходник
-  ctx.drawImage(img,0,0);
-
-  if(!quad){
-    resEl.innerHTML = "<span class='bad'>Рамка не найдена.</span>\nПопробуй: меньше бликов, рамка целиком, чуть дальше камера.";
-    statusEl.textContent = "Готово";
-    // cleanup
-    src.delete(); gray.delete(); gblur.delete(); edges.delete();
-    btn.disabled = false; return;
+  return dst;
+}
+function dilate(b,w,h){ const o=new Uint8Array(w*h);
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){ const p=y*w+x;
+    o[p]=b[p]||b[p-1]||b[p+1]||b[p-w]||b[p+w]||b[p-w-1]||b[p-w+1]||b[p+w-1]||b[p+w+1]?1:0;}
+  return o;
+}
+function erode(b,w,h){ const o=new Uint8Array(w*h);
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){ const p=y*w+x;
+    o[p]=b[p]&&b[p-1]&&b[p+1]&&b[p-w]&&b[p+w]&&b[p-w-1]&&b[p-w+1]&&b[p+w-1]&&b[p+w+1]?1:0;}
+  return o;
+}
+function cc(b,w,h){
+  const v=new Uint8Array(w*h), st=[], res=[], id=(x,y)=>y*w+x;
+  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){ const p=id(x,y);
+    if(!b[p]||v[p]) continue; let a=0,sx=0,sy=0,per=0; st.length=0; st.push(p); v[p]=1;
+    while(st.length){ const q=st.pop(), qy=(q/w)|0, qx=q-qy*w; a++; sx+=qx; sy+=qy;
+      const n1=q-1,n2=q+1,n3=q-w,n4=q+w; if(!b[n1])per++; if(!b[n2])per++; if(!b[n3])per++; if(!b[n4])per++;
+      if(b[n1]&&!v[n1]){v[n1]=1;st.push(n1)} if(b[n2]&&!v[n2]){v[n2]=1;st.push(n2)}
+      if(b[n3]&&!v[n3]){v[n3]=1;st.push(n3)} if(b[n4]&&!v[n4]){v[n4]=1;st.push(n4)}
+    }
+    res.push({area:a,cx:sx/a,cy:sy/a,per});
   }
-
-  const pts = orderQuad(quad);
-  const pxPerMM = pxPerMMFromQuad(pts);
-
-  // draw frame red
-  ctx.strokeStyle = "#ff0000";
-  ctx.lineWidth = 6;
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  ctx.lineTo(pts[1].x, pts[1].y);
-  ctx.lineTo(pts[2].x, pts[2].y);
-  ctx.lineTo(pts[3].x, pts[3].y);
-  ctx.closePath();
-  ctx.stroke();
-
-  // adaptive threshold for pins
-  let blur = new cv.Mat();
-  cv.GaussianBlur(gray, blur, new cv.Size(5,5), 0);
-
-  let bin = new cv.Mat();
-  cv.adaptiveThreshold(
-    blur, bin, 255,
-    cv.ADAPTIVE_THRESH_GAUSSIAN_C,
-    cv.THRESH_BINARY,
-    blockSize, C
-  );
-
-  // лёгкая морфология (чтобы убрать дырки и шум)
-  let kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(3,3));
-  cv.morphologyEx(bin, bin, cv.MORPH_OPEN, kernel);
-  cv.morphologyEx(bin, bin, cv.MORPH_CLOSE, kernel);
-
-  let contours = new cv.MatVector();
-  let hier = new cv.Mat();
-  cv.findContours(bin, contours, hier, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-  let count=0, sum=0;
-  let kept=0, rejected=0;
-
-  for(let i=0;i<contours.size();i++){
-    let c = contours.get(i);
-    let area = cv.contourArea(c);
-    if(area < minArea) { rejected++; continue; }
-
-    let peri = cv.arcLength(c, true);
-    if(peri <= 0) { rejected++; continue; }
-
-    let circ = 4*Math.PI*area/(peri*peri);
-    if(circ < minCirc) { rejected++; continue; }
-
-    // эквивалентный диаметр
-    let dPx = Math.sqrt(4*area/Math.PI);
-    let dMM = dPx / pxPerMM;
-
-    if(dMM < dMin || dMM > dMax) { rejected++; continue; }
-
-    // центр масс
-    let m = cv.moments(c);
-    if(m.m00 === 0) { rejected++; continue; }
-    let x = m.m10/m.m00;
-    let y = m.m01/m.m00;
-
-    // draw green
-    ctx.strokeStyle="#00ff00";
-    ctx.lineWidth=4;
-    ctx.beginPath();
-    ctx.arc(x, y, Math.max(6, dPx/2), 0, 2*Math.PI);
-    ctx.stroke();
-
-    count++; sum += dMM; kept++;
-  }
-
-  const avg = count ? (sum/count).toFixed(1) : "0.0";
-  const pxmm = pxPerMM.toFixed(3);
-
-  resEl.textContent =
-`Пинов > ${dMin} мм: ${count}
-Средний диаметр: ${avg} мм
-pxPerMM (по рамке): ${pxmm}
-Настройки: blockSize=${blockSize}, C=${C}, minArea=${minArea}, minCirc=${minCirc}
-kept=${kept}, rejected=${rejected}`;
-
-  statusEl.innerHTML = "<span class='ok'>Готово.</span> Подкрути параметры и повтори «АНАЛИЗ», если нужно.";
-
-  // cleanup
-  quad.delete();
-  src.delete(); gray.delete(); gblur.delete(); edges.delete();
-  blur.delete(); bin.delete(); kernel.delete();
-  contours.delete(); hier.delete();
-
-  btn.disabled = false;
-};
+  return res;
+}
 </script>
 </body>
 </html>
