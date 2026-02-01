@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — B2: Day1/Day2 Growth (Semi-auto, circularity)</title>
+<title>MWC — B2 Growth (Semi-auto, tuned)</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -25,10 +25,10 @@
 </head>
 
 <body>
-<h1>MWC — B2 (полуавто): выросшие грибы зелёным</h1>
+<h1>MWC — B2 (полуавто): рост Day1→Day2</h1>
 <div class="small">
-1) Загрузи Day1 + Day2 → 2) «Анализ» → на Day2: 🟢 grown, 🟡 new, ⚪ same, 🔴 excluded, 🟠 manual.<br>
-Фильтр: <b>круглость</b> (сильно режет мицелий/пятна).
+Авто: находит грибы на Day2, сравнивает радиусы с Day1. На Day2: 🟢 grown, 🟡 new, 🔵 same, 🔴 excluded, 🟠 manual.<br>
+Правки Day2: Tap=toggle exclude • DoubleTap=add manual • Hold+Drag=move
 </div>
 
 <div class="card">
@@ -50,7 +50,7 @@
 <div class="card">
   <b>Просмотр</b>
   <canvas id="cv"></canvas>
-  <div class="small">Правки на Day2: Tap=toggle exclude • DoubleTap=add manual • Hold+Drag=move</div>
+  <div class="small">На Day2 можно корректировать круги.</div>
 
   <div class="row">
     <button id="undo" class="secondary" disabled>Undo</button>
@@ -62,10 +62,38 @@
     <button id="savepng" class="secondary" disabled>Сохранить PNG</button>
   </div>
 
-  <div class="small kv">🟢 grown • 🟡 new • ⚪ same • 🔴 excluded • 🟠 manual</div>
+  <div class="small kv">🟢 grown • 🟡 new • 🔵 same • 🔴 excluded • 🟠 manual</div>
 </div>
 
 <script>
+/* ------------------- TUNING (под твои фото) -------------------
+   Если всё ещё много мелкой “пыли” → увеличь MIN_R_PX до 12–14.
+   Если выросло всё равно 0 → уменьши GROW_PX до 1.0–1.5.
+---------------------------------------------------------------- */
+const WORK_MAX_W = 900;
+
+const DOG_THR = 10.0;       // было 7.0 (меньше шума)
+const NMS_MINDIST = 14;     // было 10 (меньше дублей)
+
+const MIN_R_PX = 10;        // отрезаем мицелий (важно!)
+const MAX_R_PX = 110;
+
+const GROW_PX = 1.8;        // порог роста радиуса
+const MATCH_MAX_DIST = 18;  // поиск на Day1 рядом
+
+// круглый фильтр Day2 (строже)
+const CIRC_DAY2 = {
+  edgeMeanMin: 12,
+  edgeCVMax: 0.60,
+  contrastMin: 10
+};
+// круглый фильтр Day1 (чуть мягче, иначе всё станет "same" или "new" из-за шума)
+const CIRC_DAY1 = {
+  edgeMeanMin: 10,
+  edgeCVMax: 0.75,
+  contrastMin: 8
+};
+
 const img1Input = document.getElementById("img1");
 const img2Input = document.getElementById("img2");
 const show1Btn = document.getElementById("show1");
@@ -82,28 +110,15 @@ const resetBtn = document.getElementById("reset");
 const exportBtn = document.getElementById("export");
 const saveBtn = document.getElementById("savepng");
 
-// ----- state -----
 let day1=null, day2=null;
-let view=2; // 1 or 2
+let view=2;
 
-let work = null;
-/*
-work = {
-  W,H, dx,dy, score,
-  blobs2: [{x,y,r, src:"auto|manual", excluded:false, cls:"grown|new|same", match:{r1,found}}],
-  baseBlobs2: [...],
-  meta: {growPx, maxDist, sc, circ}
-}
-*/
-
-let history = [];
+let work=null;
+let history=[];
 let dragging=false, dragIdx=-1;
 let pressTimer=null;
+let lastTapTime=0, lastTapPos=null;
 
-let lastTapTime=0;
-let lastTapPos=null;
-
-// cached gray buffers for manual operations
 let _g2=null, _g1a=null;
 
 function setOut(t, cls=""){
@@ -111,7 +126,6 @@ function setOut(t, cls=""){
   outEl.textContent = t;
 }
 function ready(){ return !!(day1 && day2); }
-
 function updateUI(){
   const r = ready();
   show1Btn.disabled = !r;
@@ -121,36 +135,31 @@ function updateUI(){
   undoBtn.disabled = history.length===0;
   clearManualBtn.disabled = !(work && work.blobs2.some(b=>b.src==="manual"));
   resetBtn.disabled = !(work && work.baseBlobs2 && work.baseBlobs2.length);
-
   exportBtn.disabled = !work;
   saveBtn.disabled = !ready();
 }
-
 function pushHistory(){
   if(!work) return;
   history.push(JSON.stringify(work.blobs2));
-  if(history.length > 120) history.shift();
+  if(history.length>120) history.shift();
   updateUI();
 }
-
 function invalidateWorkBuffers(){ _g2=null; _g1a=null; }
 
 function fileToImg(f){
   return new Promise((resolve,reject)=>{
-    const i = new Image();
-    i.onload = ()=>resolve(i);
-    i.onerror = reject;
-    i.src = URL.createObjectURL(f);
+    const i=new Image();
+    i.onload=()=>resolve(i);
+    i.onerror=reject;
+    i.src=URL.createObjectURL(f);
   });
 }
-
 function fitCanvasToImage(img){
-  const maxW = 1100;
-  const sc = Math.min(1, maxW / img.naturalWidth);
-  cv.width  = Math.round(img.naturalWidth * sc);
-  cv.height = Math.round(img.naturalHeight * sc);
+  const maxW=1100;
+  const sc=Math.min(1, maxW / img.naturalWidth);
+  cv.width=Math.round(img.naturalWidth*sc);
+  cv.height=Math.round(img.naturalHeight*sc);
 }
-
 function drawBaseImage(){
   if(!ready()) return;
   if(view===1){
@@ -161,54 +170,34 @@ function drawBaseImage(){
     ctx.drawImage(day2,0,0,cv.width,cv.height);
   }
 }
-
 function canvasXY(ev){
-  const r = cv.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (cv.width  / r.width);
-  const y = (ev.clientY - r.top)  * (cv.height / r.height);
+  const r=cv.getBoundingClientRect();
+  const x=(ev.clientX - r.left) * (cv.width / r.width);
+  const y=(ev.clientY - r.top)  * (cv.height/ r.height);
   return {x,y};
 }
 function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
 
-function nearestBlobIdx(x,y, px=26){
-  if(!work || view!==2) return -1;
-  const sx = work.W / cv.width;
-  const sy = work.H / cv.height;
-  const wx = x * sx, wy = y * sy;
-  const p = {x:wx,y:wy};
-  const max2 = (px*sx)*(px*sx);
-
-  let best=-1, bestD=1e18;
-  for(let i=0;i<work.blobs2.length;i++){
-    const b=work.blobs2[i];
-    const d=dist2(b,p);
-    if(d<max2 && d<bestD){ bestD=d; best=i; }
-  }
-  return best;
-}
-
-// ----- drawing -----
 function strokeForBlob(b){
-  if(b.excluded) return "#ff3333";
-  if(b.src==="manual") return "#ff9900";
-  if(b.cls==="grown") return "#00aa55";
-  if(b.cls==="new") return "#ffd400";
-  return "#ffffff";
+  if(b.excluded) return "#ff3333";     // red
+  if(b.src==="manual") return "#ff9900"; // orange
+  if(b.cls==="grown") return "#00aa55";  // green
+  if(b.cls==="new")   return "#ffd400";  // yellow
+  return "#2aa8ff"; // same = blue (чтобы было видно на светлом)
 }
 
 function redraw(){
   if(!ready()) return;
-
   drawBaseImage();
 
   if(view===2 && work){
-    const sx = cv.width / work.W;
-    const sy = cv.height/ work.H;
+    const sx=cv.width/work.W;
+    const sy=cv.height/work.H;
 
-    ctx.lineWidth = 3;
+    ctx.lineWidth=3;
     for(const b of work.blobs2){
-      const x = b.x*sx, y=b.y*sy;
-      const r = Math.max(8, b.r*sx);
+      const x=b.x*sx, y=b.y*sy;
+      const r=Math.max(8, b.r*sx);
       ctx.strokeStyle = strokeForBlob(b);
       ctx.beginPath();
       ctx.arc(x,y,r,0,Math.PI*2);
@@ -219,43 +208,43 @@ function redraw(){
     const news  = work.blobs2.filter(b=>!b.excluded && b.cls==="new").length;
     const all   = work.blobs2.filter(b=>!b.excluded).length;
 
-    ctx.font = "14px ui-monospace, Menlo, monospace";
-    ctx.fillStyle = "rgba(0,0,0,.55)";
-    ctx.fillRect(8,8,470,52);
-    ctx.fillStyle = "#fff";
+    ctx.font="14px ui-monospace, Menlo, monospace";
+    ctx.fillStyle="rgba(0,0,0,.55)";
+    ctx.fillRect(8,8,520,70);
+    ctx.fillStyle="#fff";
     ctx.fillText(`all: ${all}  grown: ${grown}  new: ${news}`, 14, 28);
     ctx.fillText(`align dx=${work.dx}, dy=${work.dy}`, 14, 46);
+    ctx.fillText(`kept=${work.meta.kept}  rejected=${work.meta.rejected}`, 14, 64);
   }
 
   updateUI();
 }
 
-// ----- image processing -----
-function toGray(rgba, n){
-  const g = new Float32Array(n);
+/* ---------------- image processing ---------------- */
+function toGray(rgba,n){
+  const g=new Float32Array(n);
   for(let i=0;i<n;i++){
     const r=rgba[i*4], gg=rgba[i*4+1], b=rgba[i*4+2];
     g[i]=0.2126*r + 0.7152*gg + 0.0722*b;
   }
   return g;
 }
-
-function gaussianKernel1D(sigma, r){
-  const k = new Float32Array(2*r+1);
-  const s2 = sigma*sigma*2;
+function gaussianKernel1D(sigma,r){
+  const k=new Float32Array(2*r+1);
+  const s2=sigma*sigma*2;
   let sum=0;
   for(let i=-r;i<=r;i++){
-    const v = Math.exp(-(i*i)/s2);
+    const v=Math.exp(-(i*i)/s2);
     k[i+r]=v; sum+=v;
   }
   for(let i=0;i<k.length;i++) k[i]/=sum;
   return k;
 }
 function gaussianBlurSep(src,w,h,sigma){
-  const r = Math.max(1, Math.ceil(sigma*2.5));
-  const k = gaussianKernel1D(sigma, r);
-  const tmp = new Float32Array(w*h);
-  const dst = new Float32Array(w*h);
+  const r=Math.max(1, Math.ceil(sigma*2.5));
+  const k=gaussianKernel1D(sigma,r);
+  const tmp=new Float32Array(w*h);
+  const dst=new Float32Array(w*h);
 
   for(let y=0;y<h;y++){
     const row=y*w;
@@ -263,7 +252,7 @@ function gaussianBlurSep(src,w,h,sigma){
       let sum=0;
       for(let i=-r;i<=r;i++){
         const xx=Math.min(w-1,Math.max(0,x+i));
-        sum += src[row+xx]*k[i+r];
+        sum+=src[row+xx]*k[i+r];
       }
       tmp[row+x]=sum;
     }
@@ -273,14 +262,13 @@ function gaussianBlurSep(src,w,h,sigma){
       let sum=0;
       for(let i=-r;i<=r;i++){
         const yy=Math.min(h-1,Math.max(0,y+i));
-        sum += tmp[yy*w+x]*k[i+r];
+        sum+=tmp[yy*w+x]*k[i+r];
       }
       dst[y*w+x]=sum;
     }
   }
   return dst;
 }
-
 function boxBlur(src,w,h,r){
   const dst=new Float32Array(w*h), iw=w+1, integ=new Float32Array((w+1)*(h+1));
   for(let y=1;y<=h;y++){
@@ -302,73 +290,71 @@ function boxBlur(src,w,h,r){
 }
 
 function detectBlobsDoG(g,w,h){
-  const bg = boxBlur(g,w,h,18);
-  const x = new Float32Array(w*h);
-  for(let i=0;i<w*h;i++) x[i] = g[i]-bg[i];
+  const bg=boxBlur(g,w,h,18);
+  const x=new Float32Array(w*h);
+  for(let i=0;i<w*h;i++) x[i]=g[i]-bg[i];
 
-  const rMin = 6;
-  const rMax = Math.min(70, Math.min(w,h)*0.12);
+  const rMin=Math.max(MIN_R_PX, 6);
+  const rMax=Math.min(80, Math.min(w,h)*0.14);
 
-  const sigmas = [];
+  const sigmas=[];
   for(let r=rMin; r<=rMax; r*=1.22){
     sigmas.push(r/1.4142);
     if(sigmas.length>18) break;
   }
-  const blurs = sigmas.map(s => gaussianBlurSep(x,w,h,s));
+  const blurs=sigmas.map(s=>gaussianBlurSep(x,w,h,s));
 
-  const candidates = [];
-  const thr = 7.0;
-
+  const cand=[];
   for(let k=0;k<blurs.length-1;k++){
     const a=blurs[k], b=blurs[k+1];
-    const dog = new Float32Array(w*h);
+    const dog=new Float32Array(w*h);
     for(let i=0;i<w*h;i++) dog[i]=a[i]-b[i];
+    const r=sigmas[k]*1.4142;
 
-    const r = sigmas[k]*1.4142;
     for(let y=1;y<h-1;y++){
       for(let x2=1;x2<w-1;x2++){
         const idx=y*w+x2;
         const v=dog[idx];
-        if(v < thr) continue;
+        if(v < DOG_THR) continue;
         if(v < dog[idx-1] || v < dog[idx+1] || v < dog[idx-w] || v < dog[idx+w]) continue;
         if(v < dog[idx-w-1] || v < dog[idx-w+1] || v < dog[idx+w-1] || v < dog[idx+w+1]) continue;
-        candidates.push({x:x2,y,score:v,r});
+        cand.push({x:x2,y,score:v,r});
       }
     }
   }
 
-  candidates.sort((p,q)=>q.score-p.score);
+  cand.sort((p,q)=>q.score-p.score);
   const kept=[];
-  const minDist = 10;
-  const minDist2 = minDist*minDist;
+  const minD2=NMS_MINDIST*NMS_MINDIST;
 
-  for(const c of candidates){
+  for(const c of cand){
+    if(c.r < MIN_R_PX || c.r > MAX_R_PX) continue;
     let ok=true;
     for(const k of kept){
       const dx=c.x-k.x, dy=c.y-k.y;
-      if(dx*dx+dy*dy < minDist2){ ok=false; break; }
+      if(dx*dx+dy*dy < minD2){ ok=false; break; }
     }
     if(!ok) continue;
     kept.push({x:c.x,y:c.y,r:c.r,score:c.score});
-    if(kept.length>600) break;
+    if(kept.length>450) break;
   }
   return kept;
 }
 
-// ----- shift estimation -----
+/* ---- shift estimation (translation) ---- */
 function resizeGrayNearest(src,SW,SH,W,H){
   const dst=new Float32Array(W*H);
   for(let y=0;y<H;y++){
-    const sy = Math.min(SH-1, Math.max(0, Math.round(y*SH/H)));
+    const sy=Math.min(SH-1,Math.max(0,Math.round(y*SH/H)));
     for(let x=0;x<W;x++){
-      const sx = Math.min(SW-1, Math.max(0, Math.round(x*SW/W)));
+      const sx=Math.min(SW-1,Math.max(0,Math.round(x*SW/W)));
       dst[y*W+x]=src[sy*SW+sx];
     }
   }
   return dst;
 }
 function gradMag(g,W,H){
-  const out = new Float32Array(W*H);
+  const out=new Float32Array(W*H);
   for(let y=1;y<H-1;y++){
     for(let x=1;x<W-1;x++){
       const i=y*W+x;
@@ -381,21 +367,20 @@ function gradMag(g,W,H){
 }
 function estimateShift(g1,g2,W,H){
   const max=260;
-  const sc = Math.min(1, max / W);
-  const w = Math.max(90, Math.round(W*sc));
-  const h = Math.max(90, Math.round(H*sc));
+  const sc=Math.min(1, max / W);
+  const w=Math.max(90,Math.round(W*sc));
+  const h=Math.max(90,Math.round(H*sc));
 
-  const a = resizeGrayNearest(g1,W,H,w,h);
-  const b = resizeGrayNearest(g2,W,H,w,h);
-  const ag = gradMag(a,w,h);
-  const bg = gradMag(b,w,h);
+  const a=resizeGrayNearest(g1,W,H,w,h);
+  const b=resizeGrayNearest(g2,W,H,w,h);
+  const ag=gradMag(a,w,h);
+  const bg=gradMag(b,w,h);
 
-  const range = 24;
+  const range=24;
   const x0=Math.floor(w*0.15), x1=Math.floor(w*0.85);
   const y0=Math.floor(h*0.15), y1=Math.floor(h*0.85);
 
   let best={dx:0,dy:0,score:Infinity};
-
   for(let dy=-range; dy<=range; dy++){
     for(let dx=-range; dx<=range; dx++){
       let s=0, cnt=0;
@@ -406,7 +391,7 @@ function estimateShift(g1,g2,W,H){
         for(let x=x0; x<x1; x++){
           const sx=x-dx;
           if(sx<x0||sx>=x1) continue;
-          s += Math.abs(bg[row+x]-ag[srow+sx]);
+          s+=Math.abs(bg[row+x]-ag[srow+sx]);
           cnt++;
         }
       }
@@ -418,7 +403,6 @@ function estimateShift(g1,g2,W,H){
   }
   return {dx:Math.round(best.dx/sc), dy:Math.round(best.dy/sc), score:best.score};
 }
-
 function shiftGray(src,W,H,dx,dy){
   const dst=new Float32Array(W*H);
   for(let y=0;y<H;y++){
@@ -433,111 +417,95 @@ function shiftGray(src,W,H,dx,dy){
   return dst;
 }
 
-// ----- radius + circularity -----
-// estimate best radius by edge strength along circle
-function estimateRadiusAt(gray,W,H,cx,cy, rMin=6, rMax=90){
+/* ---- radius + circularity ---- */
+function estimateRadiusAt(gray,W,H,cx,cy,rMin=MIN_R_PX,rMax=MAX_R_PX){
   const x0=Math.round(cx), y0=Math.round(cy);
   if(x0<2||y0<2||x0>=W-2||y0>=H-2) return null;
 
-  const N = 24;
+  const N=24;
   let bestR=null, bestS=0;
 
   for(let r=rMin; r<=rMax; r+=2){
     let s=0, cnt=0;
     for(let k=0;k<N;k++){
-      const ang = (k/N)*Math.PI*2;
-      const x = x0 + Math.cos(ang)*r;
-      const y = y0 + Math.sin(ang)*r;
-      const ix = Math.round(x), iy = Math.round(y);
+      const ang=(k/N)*Math.PI*2;
+      const x=x0+Math.cos(ang)*r;
+      const y=y0+Math.sin(ang)*r;
+      const ix=Math.round(x), iy=Math.round(y);
       if(ix<1||iy<1||ix>=W-1||iy>=H-1) continue;
-
       const i=iy*W+ix;
-      const gx = gray[i+1]-gray[i-1];
-      const gy = gray[i+W]-gray[i-W];
+      const gx=gray[i+1]-gray[i-1];
+      const gy=gray[i+W]-gray[i-W];
       s += Math.abs(gx)+Math.abs(gy);
       cnt++;
     }
     if(cnt){
-      const avg = s/cnt;
-      if(avg > bestS){
-        bestS = avg;
-        bestR = r;
-      }
+      const avg=s/cnt;
+      if(avg>bestS){ bestS=avg; bestR=r; }
     }
   }
-
   if(bestR===null) return null;
-  if(bestS < 10) return null; // edge too weak
+  if(bestS < 12) return null; // чуть строже
   return bestR;
 }
 
-// circularity gate: ring edge uniformity + inside/outside contrast
 function circleQuality(gray,W,H,cx,cy,r){
   const N=24;
   const x0=Math.round(cx), y0=Math.round(cy);
-  if(x0<2||y0<2||x0>=W-2||y0>=H-2) return {ok:false, reason:"oob"};
+  if(x0<2||y0<2||x0>=W-2||y0>=H-2) return {ok:false};
 
-  const rin  = Math.max(2, Math.round(r*0.70));
-  const rout = Math.max(r+2, Math.round(r*1.15));
+  const rin=Math.max(2, Math.round(r*0.70));
+  const rout=Math.max(r+2, Math.round(r*1.15));
 
   let edgeSum=0, edgeSum2=0, edgeCnt=0;
-  let inSum=0, inCnt=0;
-  let outSum=0, outCnt=0;
+  let inSum=0,inCnt=0;
+  let outSum=0,outCnt=0;
 
   for(let k=0;k<N;k++){
-    const ang = (k/N)*Math.PI*2;
-    const cs = Math.cos(ang), sn = Math.sin(ang);
+    const ang=(k/N)*Math.PI*2;
+    const cs=Math.cos(ang), sn=Math.sin(ang);
 
     // edge at r
     {
-      const x = x0 + cs*r;
-      const y = y0 + sn*r;
-      const ix = Math.round(x), iy = Math.round(y);
+      const ix=Math.round(x0+cs*r);
+      const iy=Math.round(y0+sn*r);
       if(ix<1||iy<1||ix>=W-1||iy>=H-1) continue;
       const i=iy*W+ix;
-      const gx = gray[i+1]-gray[i-1];
-      const gy = gray[i+W]-gray[i-W];
-      const e = Math.abs(gx)+Math.abs(gy);
-      edgeSum += e; edgeSum2 += e*e; edgeCnt++;
+      const gx=gray[i+1]-gray[i-1];
+      const gy=gray[i+W]-gray[i-W];
+      const e=Math.abs(gx)+Math.abs(gy);
+      edgeSum+=e; edgeSum2+=e*e; edgeCnt++;
     }
 
-    // inside sample
+    // inside
     {
-      const x = x0 + cs*rin;
-      const y = y0 + sn*rin;
-      const ix = Math.round(x), iy = Math.round(y);
-      if(ix>=0&&iy>=0&&ix<W&&iy<H){
-        inSum += gray[iy*W+ix]; inCnt++;
-      }
+      const ix=Math.round(x0+cs*rin);
+      const iy=Math.round(y0+sn*rin);
+      if(ix>=0&&iy>=0&&ix<W&&iy<H){ inSum+=gray[iy*W+ix]; inCnt++; }
     }
-
-    // outside sample
+    // outside
     {
-      const x = x0 + cs*rout;
-      const y = y0 + sn*rout;
-      const ix = Math.round(x), iy = Math.round(y);
-      if(ix>=0&&iy>=0&&ix<W&&iy<H){
-        outSum += gray[iy*W+ix]; outCnt++;
-      }
+      const ix=Math.round(x0+cs*rout);
+      const iy=Math.round(y0+sn*rout);
+      if(ix>=0&&iy>=0&&ix<W&&iy<H){ outSum+=gray[iy*W+ix]; outCnt++; }
     }
   }
 
-  if(edgeCnt < 12 || inCnt < 12 || outCnt < 12) return {ok:false, reason:"sparse"};
+  if(edgeCnt<12 || inCnt<12 || outCnt<12) return {ok:false};
+  const edgeMean=edgeSum/edgeCnt;
+  const edgeStd=Math.sqrt(Math.max(1e-6, edgeSum2/edgeCnt - edgeMean*edgeMean));
+  const edgeCV=edgeStd/Math.max(1e-6, edgeMean);
+  const contrast=(inSum/inCnt) - (outSum/outCnt);
 
-  const edgeMean = edgeSum/edgeCnt;
-  const edgeStd  = Math.sqrt(Math.max(1e-6, edgeSum2/edgeCnt - edgeMean*edgeMean));
-  const edgeCV   = edgeStd / Math.max(1e-6, edgeMean);
+  return {ok:true, edgeMean, edgeCV, contrast};
+}
 
-  const inMean = inSum/inCnt;
-  const outMean= outSum/outCnt;
-  const contrast = inMean - outMean; // mushroom cap tends to be brighter than surrounding
-
-  // thresholds (tuned for your trays)
-  const okEdge = edgeMean >= 10;         // must have clear boundary
-  const okCV   = edgeCV <= 0.85;         // too ragged => mycelium/clumps
-  const okCon  = contrast >= 6;          // inside brighter than outside (helps kill mycelium)
-
-  return {ok: (okEdge && okCV && okCon), edgeMean, edgeCV, contrast};
+function passCirc(q, thr){
+  if(!q.ok) return false;
+  if(q.edgeMean < thr.edgeMeanMin) return false;
+  if(q.edgeCV > thr.edgeCVMax) return false;
+  if(q.contrast < thr.contrastMin) return false;
+  return true;
 }
 
 function getWorkGrayDay2(){
@@ -548,7 +516,7 @@ function getWorkGrayDay2(){
   const x=c.getContext("2d",{willReadFrequently:true});
   x.drawImage(day2,0,0,W,H);
   const im=x.getImageData(0,0,W,H);
-  _g2 = toGray(im.data,W*H);
+  _g2=toGray(im.data,W*H);
   return _g2;
 }
 function getWorkGrayDay1Aligned(){
@@ -560,18 +528,17 @@ function getWorkGrayDay1Aligned(){
   x.drawImage(day1,0,0,W,H);
   const im=x.getImageData(0,0,W,H);
   const g1=toGray(im.data,W*H);
-  _g1a = shiftGray(g1,W,H,work.dx,work.dy);
+  _g1a=shiftGray(g1,W,H,work.dx,work.dy);
   return _g1a;
 }
 
-// ----- analyze growth -----
+/* ---------------- analyze ---------------- */
 async function runAnalyze(){
-  setOut("Анализ: подготовка…", "warn");
+  setOut("Анализ: подготовка…","warn");
 
-  const maxW=900;
-  const sc = Math.min(1, maxW / day2.naturalWidth);
-  const W = Math.round(day2.naturalWidth*sc);
-  const H = Math.round(day2.naturalHeight*sc);
+  const sc=Math.min(1, WORK_MAX_W / day2.naturalWidth);
+  const W=Math.round(day2.naturalWidth*sc);
+  const H=Math.round(day2.naturalHeight*sc);
 
   const c1=document.createElement("canvas");
   const c2=document.createElement("canvas");
@@ -587,220 +554,172 @@ async function runAnalyze(){
   const g1=toGray(im1.data,W*H);
   const g2=toGray(im2.data,W*H);
 
-  setOut("Анализ: выравнивание Day1 → Day2…", "warn");
-  const {dx,dy,score} = estimateShift(g1,g2,W,H);
-  const g1a = shiftGray(g1,W,H,dx,dy);
+  setOut("Анализ: выравнивание Day1 → Day2…","warn");
+  const {dx,dy,score}=estimateShift(g1,g2,W,H);
+  const g1a=shiftGray(g1,W,H,dx,dy);
 
-  setOut("Анализ: поиск грибов на Day2 (blob)…", "warn");
-  const raw2 = detectBlobsDoG(g2,W,H);
+  setOut("Анализ: поиск грибов на Day2…","warn");
+  const raw2=detectBlobsDoG(g2,W,H);
 
-  // circularity thresholds (можно потом подстроить, если надо)
-  const circ = {
-    edgeMeanMin: 10,
-    edgeCVMax: 0.85,
-    contrastMin: 6
-  };
-
-  // refine & filter by circularity
-  const blobs2 = [];
-  let rejected = 0;
+  const blobs2=[];
+  let rejected=0;
 
   for(const b of raw2){
-    const rGuessMin = Math.max(6, Math.round(b.r*0.7));
-    const rGuessMax = Math.min(90, Math.round(b.r*1.6));
-    const r2 = estimateRadiusAt(g2,W,H,b.x,b.y, rGuessMin, rGuessMax);
-    if(r2===null) { rejected++; continue; }
-    if(r2 < 6) { rejected++; continue; }
-    if(r2 > Math.min(W,H)*0.14) { rejected++; continue; }
+    const r2=estimateRadiusAt(g2,W,H,b.x,b.y, MIN_R_PX, MAX_R_PX);
+    if(r2===null){ rejected++; continue; }
+    if(r2<MIN_R_PX || r2>MAX_R_PX){ rejected++; continue; }
 
-    const q = circleQuality(g2,W,H,b.x,b.y,r2);
-    // apply thresholds
-    const ok =
-      q.ok &&
-      q.edgeMean >= circ.edgeMeanMin &&
-      q.edgeCV <= circ.edgeCVMax &&
-      q.contrast >= circ.contrastMin;
+    const q2=circleQuality(g2,W,H,b.x,b.y,r2);
+    if(!passCirc(q2, CIRC_DAY2)){ rejected++; continue; }
 
-    if(!ok){
-      rejected++;
-      continue;
-    }
-
-    blobs2.push({x:b.x,y:b.y,r:r2, src:"auto", excluded:false, cls:"same", match:{found:false, r1:null}});
+    blobs2.push({x:b.x,y:b.y,r:r2, src:"auto", excluded:false, cls:"same", match:{found:false,r1:null}});
   }
 
-  setOut("Анализ: сравнение размеров Day1 vs Day2…", "warn");
-
-  const growPx = 2.5;
-  const maxDist = 18;
-  const maxR = 90;
+  setOut("Анализ: сравнение размеров Day1 vs Day2…","warn");
 
   for(const b of blobs2){
-    let best = {r1:null, s:0};
-    for(let oy=-maxDist; oy<=maxDist; oy+=3){
-      for(let ox=-maxDist; ox<=maxDist; ox+=3){
+    let best=null;
+
+    for(let oy=-MATCH_MAX_DIST; oy<=MATCH_MAX_DIST; oy+=3){
+      for(let ox=-MATCH_MAX_DIST; ox<=MATCH_MAX_DIST; ox+=3){
         const cx=b.x+ox, cy=b.y+oy;
         if(cx<2||cy<2||cx>=W-2||cy>=H-2) continue;
-        const r1 = estimateRadiusAt(g1a,W,H,cx,cy, Math.max(6, Math.round(b.r*0.6)), Math.min(maxR, Math.round(b.r*1.6)));
+
+        const r1=estimateRadiusAt(g1a,W,H,cx,cy, MIN_R_PX, MAX_R_PX);
         if(r1===null) continue;
-        const clos = 1 / (1 + Math.abs(r1 - b.r));
-        const scv = clos;
-        if(scv > best.s){
-          best = {r1, s: scv};
+
+        const q1=circleQuality(g1a,W,H,cx,cy,r1);
+        if(!passCirc(q1, CIRC_DAY1)) continue;
+
+        // score: prefer near center + similar size
+        const d2=ox*ox+oy*oy;
+        const clos = 1/(1+Math.abs(r1-b.r));
+        const score = clos / (1 + d2*0.02);
+
+        if(!best || score>best.score){
+          best={r1, score};
         }
       }
     }
 
-    if(best.r1===null){
-      b.cls = "new";
-      b.match = {found:false, r1:null};
+    if(!best){
+      b.cls="new";
+      b.match={found:false,r1:null};
     }else{
-      b.match = {found:true, r1:best.r1};
-      b.cls = (b.r - best.r1) >= growPx ? "grown" : "same";
+      b.match={found:true,r1:best.r1};
+      b.cls = (b.r - best.r1) >= GROW_PX ? "grown" : "same";
     }
   }
 
-  work = {
+  work={
     W,H, dx,dy, score,
     blobs2,
     baseBlobs2: JSON.parse(JSON.stringify(blobs2)),
-    meta: {growPx, maxDist, sc, circ, rejected}
+    meta:{sc, kept:blobs2.length, rejected, params:{
+      DOG_THR,NMS_MINDIST,MIN_R_PX,MAX_R_PX,GROW_PX,MATCH_MAX_DIST,CIRC_DAY2,CIRC_DAY1
+    }}
   };
-  history = [];
-  invalidateWorkBuffers(); // rebuild lazily for manual
-  view = 2;
+  history=[];
+  invalidateWorkBuffers();
+  view=2;
 
-  const grownN = blobs2.filter(b=>!b.excluded && b.cls==="grown").length;
-  const newN   = blobs2.filter(b=>!b.excluded && b.cls==="new").length;
-  const allN   = blobs2.filter(b=>!b.excluded).length;
+  const grownN=blobs2.filter(b=>!b.excluded && b.cls==="grown").length;
+  const newN=blobs2.filter(b=>!b.excluded && b.cls==="new").length;
+  const allN=blobs2.filter(b=>!b.excluded).length;
 
   setOut(
-    `Готово.
+`Готово.
 Сдвиг: dx=${dx}, dy=${dy} (score=${score.toFixed(1)})
 Найдено грибов (Day2): ${allN}
 Выросло: ${grownN}
 Новые: ${newN}
-Отбраковано круглыми фильтрами: ${rejected}
-Порог роста: +${growPx}px радиуса`,
-    "ok"
-  );
+Отбраковано: ${rejected}
+Порог роста: +${GROW_PX}px радиуса
+MIN_R_PX: ${MIN_R_PX}  DOG_THR: ${DOG_THR}`, "ok");
 
   redraw();
 }
 
-// ----- Editing Day2 (semi-auto) -----
+/* --------- Editing Day2 --------- */
 function toggleExcludeAt(x,y){
-  const idx = nearestBlobIdx(x,y,28);
+  const idx=nearestBlobIdx(x,y,28);
   if(idx<0) return;
   pushHistory();
-  work.blobs2[idx].excluded = !work.blobs2[idx].excluded;
+  work.blobs2[idx].excluded=!work.blobs2[idx].excluded;
   redraw();
 }
-
 function addManualAt(x,y){
   if(!work) return;
-  const sx = work.W / cv.width;
-  const sy = work.H / cv.height;
-  const wx = x * sx;
-  const wy = y * sy;
+  const sx=work.W/cv.width, sy=work.H/cv.height;
+  const wx=x*sx, wy=y*sy;
 
   pushHistory();
+  const g2=getWorkGrayDay2();
+  const g1a=getWorkGrayDay1Aligned();
 
-  const g2 = getWorkGrayDay2();
-  const g1a = getWorkGrayDay1Aligned();
+  let r=estimateRadiusAt(g2,work.W,work.H,wx,wy, MIN_R_PX, MAX_R_PX);
+  if(r===null) r=Math.max(18, MIN_R_PX);
 
-  let r = estimateRadiusAt(g2, work.W, work.H, wx, wy, 8, 90);
-  if(r===null) r=18;
+  const b={x:wx,y:wy,r, src:"manual", excluded:false, cls:"new", match:{found:false,r1:null}};
 
-  // manual: круглый фильтр мягче (чтобы можно было “добавить” то, что автоматика пропустила)
-  const q = circleQuality(g2, work.W, work.H, wx, wy, r);
-  if(!q.ok && r < 14) r = 18;
-
-  const b = {x:wx, y:wy, r, src:"manual", excluded:false, cls:"new", match:{found:false, r1:null}};
-
-  const r1 = estimateRadiusAt(g1a, work.W, work.H, wx, wy, Math.max(6, Math.round(r*0.6)), Math.min(90, Math.round(r*1.6)));
+  // try classify vs Day1
+  const r1=estimateRadiusAt(g1a,work.W,work.H,wx,wy, MIN_R_PX, MAX_R_PX);
   if(r1!==null){
-    b.match = {found:true, r1};
-    b.cls = (r - r1) >= work.meta.growPx ? "grown" : "same";
-  }else{
-    b.cls = "new";
+    const q1=circleQuality(g1a,work.W,work.H,wx,wy,r1);
+    if(passCirc(q1, CIRC_DAY1)){
+      b.match={found:true,r1};
+      b.cls=(r-r1)>=GROW_PX ? "grown" : "same";
+    }
   }
-
   work.blobs2.push(b);
   redraw();
 }
 
+function nearestBlobIdx(x,y,px=26){
+  if(!work || view!==2) return -1;
+  const sx=work.W/cv.width, sy=work.H/cv.height;
+  const wx=x*sx, wy=y*sy;
+  const p={x:wx,y:wy};
+  const max2=(px*sx)*(px*sx);
+  let best=-1, bestD=1e18;
+  for(let i=0;i<work.blobs2.length;i++){
+    const b=work.blobs2[i];
+    const d=dist2(b,p);
+    if(d<max2 && d<bestD){ bestD=d; best=i; }
+  }
+  return best;
+}
+
 function startDragAt(x,y){
-  const idx = nearestBlobIdx(x,y,32);
+  const idx=nearestBlobIdx(x,y,32);
   if(idx<0) return false;
   pushHistory();
-  dragging=true;
-  dragIdx=idx;
-  if(work.blobs2[idx].src==="auto") work.blobs2[idx].src="manual";
+  dragging=true; dragIdx=idx;
+  work.blobs2[idx].src="manual"; // помечаем как manual только если реально двигаем
   return true;
 }
-
 function moveDragTo(x,y){
-  if(!dragging || dragIdx<0) return;
-  const sx = work.W / cv.width;
-  const sy = work.H / cv.height;
-  const b = work.blobs2[dragIdx];
-  b.x = x*sx;
-  b.y = y*sy;
-
-  const g2 = getWorkGrayDay2();
-  const g1a = getWorkGrayDay1Aligned();
-
-  const r2 = estimateRadiusAt(g2, work.W, work.H, b.x, b.y, 8, 90);
-  if(r2) b.r = r2;
-
-  const r1 = estimateRadiusAt(g1a, work.W, work.H, b.x, b.y, Math.max(6, Math.round(b.r*0.6)), Math.min(90, Math.round(b.r*1.6)));
-  if(r1!==null){
-    b.match = {found:true, r1};
-    b.cls = (b.r - r1) >= work.meta.growPx ? "grown" : "same";
-  }else{
-    b.match = {found:false, r1:null};
-    b.cls = "new";
-  }
-
+  if(!dragging||dragIdx<0) return;
+  const sx=work.W/cv.width, sy=work.H/cv.height;
+  const b=work.blobs2[dragIdx];
+  b.x=x*sx; b.y=y*sy;
   redraw();
 }
+function endDrag(){ dragging=false; dragIdx=-1; }
 
-function endDrag(){
-  dragging=false;
-  dragIdx=-1;
-}
-
-// ----- UI wiring -----
+/* -------- UI wiring -------- */
 img1Input.addEventListener("change", async ()=>{
   work=null; history=[]; invalidateWorkBuffers();
-  try{
-    day1 = await fileToImg(img1Input.files[0]);
-    setOut("Day1 загружено. Загрузи Day2.", "warn");
-  }catch(e){
-    day1=null;
-    setOut("Ошибка загрузки Day1.", "bad");
-  }
-  if(ready()){
-    view=2;
-    setOut("Оба фото загружены. Нажми «Анализ».", "ok");
-  }
+  try{ day1=await fileToImg(img1Input.files[0]); setOut("Day1 загружено. Загрузи Day2.","warn"); }
+  catch(e){ day1=null; setOut("Ошибка загрузки Day1.","bad"); }
+  if(ready()){ view=2; setOut("Оба фото загружены. Нажми «Анализ».","ok"); }
   redraw(); updateUI();
 });
-
 img2Input.addEventListener("change", async ()=>{
   work=null; history=[]; invalidateWorkBuffers();
-  try{
-    day2 = await fileToImg(img2Input.files[0]);
-    setOut("Day2 загружено. Загрузи Day1.", "warn");
-  }catch(e){
-    day2=null;
-    setOut("Ошибка загрузки Day2.", "bad");
-  }
-  if(ready()){
-    view=2;
-    setOut("Оба фото загружены. Нажми «Анализ».", "ok");
-  }
+  try{ day2=await fileToImg(img2Input.files[0]); setOut("Day2 загружено. Загрузи Day1.","warn"); }
+  catch(e){ day2=null; setOut("Ошибка загрузки Day2.","bad"); }
+  if(ready()){ view=2; setOut("Оба фото загружены. Нажми «Анализ».","ok"); }
   redraw(); updateUI();
 });
 
@@ -814,119 +733,111 @@ analyzeBtn.addEventListener("click", async ()=>{
 });
 
 undoBtn.addEventListener("click", ()=>{
-  if(!history.length || !work) return;
-  work.blobs2 = JSON.parse(history.pop());
+  if(!history.length||!work) return;
+  work.blobs2=JSON.parse(history.pop());
   redraw();
 });
-
 clearManualBtn.addEventListener("click", ()=>{
   if(!work) return;
   pushHistory();
-  work.blobs2 = work.blobs2.filter(b=>b.src!=="manual");
+  work.blobs2=work.blobs2.filter(b=>b.src!=="manual");
   redraw();
 });
-
 resetBtn.addEventListener("click", ()=>{
   if(!work) return;
   history=[];
-  work.blobs2 = JSON.parse(JSON.stringify(work.baseBlobs2));
+  work.blobs2=JSON.parse(JSON.stringify(work.baseBlobs2));
   redraw();
 });
-
 exportBtn.addEventListener("click", ()=>{
   if(!work) return;
-  const payload = {
-    version: "MWC_B2_SEMIAUTO_GROWTH_CIRC",
-    created_at: new Date().toISOString(),
-    align: {dx: work.dx, dy: work.dy, score: work.score},
-    work_size: {W: work.W, H: work.H},
-    params: work.meta,
-    blobs_day2: work.blobs2
+  const payload={
+    version:"MWC_B2_TUNED",
+    created_at:new Date().toISOString(),
+    align:{dx:work.dx,dy:work.dy,score:work.score},
+    work_size:{W:work.W,H:work.H},
+    meta:work.meta,
+    blobs_day2:work.blobs2
   };
-  const blob = new Blob([JSON.stringify(payload,null,2)], {type:"application/json"});
+  const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
-  a.download="mwc_b2_growth_circ.json";
+  a.download="mwc_b2_tuned.json";
   a.click();
 });
-
 saveBtn.addEventListener("click", ()=>{
   if(!ready()) return;
   redraw();
   const a=document.createElement("a");
   a.href=cv.toDataURL("image/png");
-  a.download = view===2 ? "mwc_b2_day2_marked.png" : "mwc_b2_day1.png";
+  a.download = view===2 ? "mwc_day2_marked.png" : "mwc_day1.png";
   a.click();
 });
 
-// ----- Canvas interactions (Day2 only) -----
-cv.addEventListener("mousedown", (ev)=>{
-  if(!work || view!==2) return;
+/* --- gestures --- */
+cv.addEventListener("mousedown",(ev)=>{
+  if(!work||view!==2) return;
   const p=canvasXY(ev);
-  pressTimer = setTimeout(()=> startDragAt(p.x,p.y), 180);
+  pressTimer=setTimeout(()=> startDragAt(p.x,p.y), 180);
 });
-cv.addEventListener("mousemove", (ev)=>{
-  if(!work || view!==2 || !dragging) return;
+cv.addEventListener("mousemove",(ev)=>{
+  if(!work||view!==2||!dragging) return;
   const p=canvasXY(ev);
   moveDragTo(p.x,p.y);
 });
-cv.addEventListener("mouseup", (ev)=>{
-  if(!work || view!==2) return;
+cv.addEventListener("mouseup",(ev)=>{
+  if(!work||view!==2) return;
   clearTimeout(pressTimer);
   const p=canvasXY(ev);
-
   if(dragging){ endDrag(); return; }
 
   const now=Date.now();
-  const isDouble = (now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
+  const isDouble=(now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
   lastTapTime=now; lastTapPos=p;
 
   if(isDouble) addManualAt(p.x,p.y);
   else toggleExcludeAt(p.x,p.y);
 });
 
-// iOS touch
-cv.addEventListener("touchstart", (ev)=>{
-  if(!work || view!==2) return;
+cv.addEventListener("touchstart",(ev)=>{
+  if(!work||view!==2) return;
   ev.preventDefault();
   const t=ev.touches[0];
   const p=canvasXY(t);
 
-  pressTimer = setTimeout(()=> startDragAt(p.x,p.y), 180);
+  pressTimer=setTimeout(()=> startDragAt(p.x,p.y), 180);
 
   const now=Date.now();
-  const isDouble = (now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
+  const isDouble=(now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
   lastTapTime=now; lastTapPos=p;
 
   if(isDouble){
     clearTimeout(pressTimer);
     addManualAt(p.x,p.y);
   }
-}, {passive:false});
+},{passive:false});
 
-cv.addEventListener("touchmove", (ev)=>{
-  if(!work || view!==2 || !dragging) return;
+cv.addEventListener("touchmove",(ev)=>{
+  if(!work||view!==2||!dragging) return;
   ev.preventDefault();
   const t=ev.touches[0];
   const p=canvasXY(t);
   moveDragTo(p.x,p.y);
-}, {passive:false});
+},{passive:false});
 
-cv.addEventListener("touchend", (ev)=>{
-  if(!work || view!==2) return;
+cv.addEventListener("touchend",(ev)=>{
+  if(!work||view!==2) return;
   ev.preventDefault();
   clearTimeout(pressTimer);
-
   if(dragging){ endDrag(); return; }
 
   const t=ev.changedTouches[0];
   const p=canvasXY(t);
   const now=Date.now();
-  const isDouble = (now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
+  const isDouble=(now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
   if(!isDouble) toggleExcludeAt(p.x,p.y);
-}, {passive:false});
+},{passive:false});
 
-// init
 updateUI();
 </script>
 </body>
