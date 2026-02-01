@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 FINAL PRO v3</title>
+<title>MWC — A1.6 FINAL PRO v4</title>
 <meta name="theme-color" content="#111">
 <style>
 body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -25,9 +25,10 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 </head>
 
 <body>
-<h1>MWC — A1.6 FINAL PRO v3</h1>
+<h1>MWC — A1.6 FINAL PRO v4</h1>
 <div class="small">
-🟢 = пины <b>4–12 мм</b> (в рост) • 🟡 = <b>2–4 мм</b> (мелочь, но не мусор)<br>
+🟢 = пины <b>4–12 мм</b> (в рост) • 🟡 = <b>2–4 мм</b> (мелочь)<br>
+Фикс против мусора: фильтр по <b>контрасту над фоном</b> внутри объекта.<br>
 Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>
 </div>
 
@@ -73,6 +74,22 @@ let corners = [];
 const RECT = 800;
 const FRAME_MM = 200;
 const mmPerPx = FRAME_MM / RECT;
+
+// --- КОНСТАНТЫ (под твои фото) ---
+const BG_RADIUS = 22;         // фон (больше = меньше влияние текстуры)
+const THR_BIN = 10;           // порог для маски (gray-bg)
+const MIN_AREA = 22;          // минимум площади в пикселях
+const MIN_CIRC = 0.24;        // форма (0.24 мягче, но режет ниточки)
+const MIN_MM = 2.0;           // ниже этого мусор не считаем вообще
+const SMALL_MIN = 2.0, SMALL_MAX = 4.0;
+const GROW_MIN  = 4.0, GROW_MAX  = 12.0;
+
+// КЛЮЧ: фильтр контраста над фоном (среднее gray-bg внутри объекта)
+const MEAN_V_SMALL = 10;      // мелочь должна быть реально яркой
+const MEAN_V_GROW  = 12;      // в рост — ещё строже (режет мицелий)
+
+// склейка близких (умеренная)
+const MERGE_PX = 9;
 
 function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
 function updateUI(){
@@ -124,12 +141,11 @@ runBtn.addEventListener("click", () => {
   cRect.width = RECT; cRect.height = RECT;
   rectCtx.putImageData(warped, 0, 0);
 
-  const {small, grow} = analyzeRectPRO(warped, RECT, RECT);
+  const {small, grow} = analyzeRectV4(warped, RECT, RECT);
 
   rectCtx.putImageData(warped, 0, 0);
   rectCtx.lineWidth = 3;
 
-  // small (2–4mm) yellow
   rectCtx.strokeStyle = "#ffd400";
   for (const p of small){
     rectCtx.beginPath();
@@ -137,7 +153,6 @@ runBtn.addEventListener("click", () => {
     rectCtx.stroke();
   }
 
-  // grow (4–12mm) green
   rectCtx.strokeStyle = "#00ff00";
   let sum = 0;
   for (const p of grow){
@@ -244,35 +259,30 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ---------- analysis (PRO v3 anti-noise) ----------
-function analyzeRectPRO(imageData, w, h){
+// ---------- analysis v4 (with mean contrast filter) ----------
+function analyzeRectV4(imageData, w, h){
   const d=imageData.data;
   const gray=new Float32Array(w*h);
   for(let i=0;i<w*h;i++) gray[i]=0.2126*d[i*4]+0.7152*d[i*4+1]+0.0722*d[i*4+2];
 
-  const bg = boxBlur(gray,w,h,18);
+  // background (bigger radius reduces texture)
+  const bg = boxBlur(gray,w,h,BG_RADIUS);
 
-  const T1 = 12;
-  const T2 = 8;        // ✅ back to safer value
-  const MIN_AREA = 16;
-  const MIN_CIRC = 0.20;
+  // v = gray - bg
+  const v = new Float32Array(w*h);
+  for(let i=0;i<w*h;i++) v[i]=gray[i]-bg[i];
 
-  // hard anti-noise: ignore <2mm completely
-  const MIN_MM_NOISE = 2.0;
+  // binary mask
+  let bin=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++) bin[i]=(v[i] > THR_BIN) ? 1 : 0;
+  bin = close(bin,w,h);
 
-  let bin1=new Uint8Array(w*h);
-  let bin2=new Uint8Array(w*h);
-  for(let i=0;i<w*h;i++){
-    const v = gray[i]-bg[i];
-    bin1[i] = (v > T1) ? 1 : 0;
-    bin2[i] = (v > T2) ? 1 : 0;
-  }
+  // components with intensity sum
+  const comps = componentsWithV(bin, v, w, h);
 
-  bin1 = close(bin1,w,h);
-  bin2 = close(bin2,w,h);
-
-  const circles = [];
-  for (const c of components(bin1,w,h).concat(components(bin2,w,h))){
+  // convert to candidates
+  const cand = [];
+  for(const c of comps){
     if(c.area < MIN_AREA) continue;
     const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
     if(circ < MIN_CIRC) continue;
@@ -280,18 +290,23 @@ function analyzeRectPRO(imageData, w, h){
     const dPx=2*Math.sqrt(c.area/Math.PI);
     const dMm=dPx*mmPerPx;
 
-    if(dMm < MIN_MM_NOISE) continue; // ✅ убрали мицелий/шум
+    if(dMm < MIN_MM) continue;
 
-    circles.push({cx:c.cx, cy:c.cy, dPx, dMm});
+    const meanV = c.sumV / c.area; // avg contrast over background
+
+    cand.push({cx:c.cx, cy:c.cy, dPx, dMm, meanV});
   }
 
-  const merged = mergeClose(circles, 9); // ✅ moderate merge
+  // merge close
+  const merged = mergeClose(cand, MERGE_PX);
 
-  const small = [];
-  const grow  = [];
+  const small=[], grow=[];
   for(const p of merged){
-    if(p.dMm >= 2 && p.dMm < 4) small.push(p);
-    else if(p.dMm >= 4 && p.dMm <= 12) grow.push(p);
+    if(p.dMm >= SMALL_MIN && p.dMm < SMALL_MAX){
+      if(p.meanV >= MEAN_V_SMALL) small.push(p);
+    } else if(p.dMm >= GROW_MIN && p.dMm <= GROW_MAX){
+      if(p.meanV >= MEAN_V_GROW) grow.push(p);
+    }
   }
   return {small, grow};
 }
@@ -308,7 +323,9 @@ function mergeClose(list, distPx){
       const dx=list[j].cx-best.cx, dy=list[j].cy-best.cy;
       if(dx*dx+dy*dy <= distPx*distPx){
         used[j]=1;
+        // keep the one with bigger diameter or higher meanV
         if(list[j].dPx > best.dPx) best = list[j];
+        else if(list[j].meanV > best.meanV && list[j].dPx >= best.dPx*0.9) best = list[j];
       }
     }
     out.push(best);
@@ -358,24 +375,28 @@ function close(b,w,h){
   return x;
 }
 
-function components(b,w,h){
-  const v=new Uint8Array(w*h), st=[], res=[], id=(x,y)=>y*w+x;
+function componentsWithV(b, v, w, h){
+  const vis=new Uint8Array(w*h), st=[], res=[], id=(x,y)=>y*w+x;
   for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
     const p=id(x,y);
-    if(!b[p]||v[p]) continue;
-    let a=0,sx=0,sy=0,per=0;
-    st.length=0; st.push(p); v[p]=1;
+    if(!b[p]||vis[p]) continue;
+
+    let area=0,sx=0,sy=0,per=0,sumV=0;
+    st.length=0; st.push(p); vis[p]=1;
+
     while(st.length){
       const q=st.pop(), qy=(q/w)|0, qx=q-qy*w;
-      a++; sx+=qx; sy+=qy;
+      area++; sx+=qx; sy+=qy; sumV += v[q];
+
       const n1=q-1,n2=q+1,n3=q-w,n4=q+w;
       if(!b[n1])per++; if(!b[n2])per++; if(!b[n3])per++; if(!b[n4])per++;
-      if(b[n1]&&!v[n1]){v[n1]=1;st.push(n1)}
-      if(b[n2]&&!v[n2]){v[n2]=1;st.push(n2)}
-      if(b[n3]&&!v[n3]){v[n3]=1;st.push(n3)}
-      if(b[n4]&&!v[n4]){v[n4]=1;st.push(n4)}
+
+      if(b[n1]&&!vis[n1]){vis[n1]=1;st.push(n1)}
+      if(b[n2]&&!vis[n2]){vis[n2]=1;st.push(n2)}
+      if(b[n3]&&!vis[n3]){vis[n3]=1;st.push(n3)}
+      if(b[n4]&&!vis[n4]){vis[n4]=1;st.push(n4)}
     }
-    res.push({area:a,cx:sx/a,cy:sy/a,per});
+    res.push({area, cx:sx/area, cy:sy/area, per, sumV});
   }
   return res;
 }
