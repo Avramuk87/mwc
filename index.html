@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.8 FULL (≥4 мм) DoG + Edit</title>
+<title>MWC — A1.9 FULL (≥min мм) DoG + Calib + Edit</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -27,11 +27,11 @@
 </head>
 
 <body>
-<h1>MWC — A1.8 FULL (DoG + ползунки + корректировка) — считаем ≥4 мм</h1>
+<h1>MWC — A1.9 FULL — рамка 20×20 см + калибровка размера</h1>
 <div class="small">
-Метод: DoG blob detection (устойчив к текстуре/мицелию).<br>
-Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>. Считаем <b>все грибы ≥ min мм</b> (включая крупные).<br>
-<b>Жесты:</b> Tap=toggle • DoubleTap=add • Hold+Drag=move
+Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>.<br>
+<b>Жесты:</b> Tap=toggle • DoubleTap=add • Hold+Drag=move<br>
+<b>Важно:</b> Если меняешь Frame size или Calib → нажми <b>Анализ</b> заново (масштаб детектора меняется).
 </div>
 
 <div class="card">
@@ -42,12 +42,20 @@
     <button id="run" disabled>Анализ</button>
   </div>
 
+  <label class="small"><b>Frame size</b> (мм) — сторона рамки, по тем углам которые ты тыкаешь</label>
+  <input id="framemm" type="range" min="150" max="230" value="200" step="1">
+  <div class="small kv" id="framemmVal">200 мм</div>
+
+  <label class="small"><b>Size calibration</b> (×) — поправка диаметра (обычно 1.05–1.25)</label>
+  <input id="calib" type="range" min="0.85" max="1.35" value="1.15" step="0.01">
+  <div class="small kv" id="calibVal">×1.15</div>
+
   <label class="small"><b>Sensitivity</b> (меньше = строже, больше = больше находок)</label>
   <input id="sens" type="range" min="1" max="20" value="8">
   <div class="small kv" id="sensVal">8</div>
 
   <label class="small"><b>Min size</b> (мм) — нижний порог для подсчёта</label>
-  <input id="minmm" type="range" min="3" max="10" value="4" step="0.5">
+  <input id="minmm" type="range" min="3" max="12" value="4" step="0.5">
   <div class="small kv" id="minmmVal">4.0</div>
 
   <div class="small" id="hint">Выбери фото.</div>
@@ -91,6 +99,12 @@ const cRect= document.getElementById("rect");
 const srcCtx = cSrc.getContext("2d", { willReadFrequently:true });
 const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
 
+const framemm = document.getElementById("framemm");
+const framemmVal = document.getElementById("framemmVal");
+
+const calib = document.getElementById("calib");
+const calibVal = document.getElementById("calibVal");
+
 const sens = document.getElementById("sens");
 const sensVal = document.getElementById("sensVal");
 
@@ -105,17 +119,22 @@ const resetEditsBtn = document.getElementById("resetEdits");
 const exportBtn = document.getElementById("export");
 const savePngBtn = document.getElementById("savepng");
 
+// ----------------- Constants -----------------
+const RECT = 800;
+const DMAX_DETECT_MM = 60.0; // потолок детектора, не "потолок подсчёта"
+const PICK_R = 28;
+
 // ----------------- State -----------------
 let imgObj = null;
 let picking = false;
 let corners = [];
 
 let points = [];        // auto + manual + excluded
-let basePoints = [];    // чистый DoG (для сброса)
-let history = [];       // undo stack
-let lastWarped = null;  // ImageData для redraw
+let basePoints = [];    // чистый DoG
+let history = [];
+let lastWarped = null;
 
-// iOS touch helpers
+// touch state
 let lastTapTime = 0;
 let lastTapPos = null;
 let doubleHandled = false;
@@ -124,25 +143,13 @@ let dragging = false;
 let dragIdx = -1;
 let pressTimer = null;
 
-// ----------------- Constants -----------------
-const RECT = 800;
-const FRAME_MM = 200;
-const mmPerPx = FRAME_MM / RECT; // 0.25 мм/px
+let scaleDirty = false; // если меняли frame/calib — просим rerun
 
-// Верхний “потолок” масштаба детектора
-const DMAX_DETECT_MM = 60.0;
-
-// Pick radius for selecting points
-const PICK_R = 28;
-
-// ----------------- UI -----------------
-sens.addEventListener("input", ()=> sensVal.textContent = sens.value);
-minmm.addEventListener("input", ()=> {
-  minmmVal.textContent = Number(minmm.value).toFixed(1);
-  if(lastWarped) redrawRect(); // live update after edits too
-});
-
+// ----------------- Functions -----------------
+function FRAME_MM(){ return Number(framemm.value); }
+function CALIB(){ return Number(calib.value); }
 function DMIN_MM(){ return Number(minmm.value); }
+function mmPerPx(){ return FRAME_MM() / RECT; }
 
 function setOut(t, cls=""){
   out.className = cls;
@@ -152,6 +159,7 @@ function setOut(t, cls=""){
 function updateUI(){
   pickBtn.disabled = !imgObj;
   runBtn.disabled = !(imgObj && corners.length === 4);
+
   undoBtn.disabled = history.length === 0;
   clearManualBtn.disabled = points.filter(p=>p.src==="manual").length === 0;
   resetEditsBtn.disabled = basePoints.length === 0;
@@ -160,10 +168,9 @@ function updateUI(){
 
   if (!imgObj) hint.textContent = "Выбери фото.";
   else if (corners.length < 4) hint.textContent = "Нажми «Выбрать 4 угла» и ткни 4 угла.";
-  else hint.textContent = "Готово. Нажми «Анализ».";
+  else hint.textContent = scaleDirty ? "Масштаб/калибровка изменены — нажми «Анализ» заново." : "Готово. Нажми «Анализ».";
 }
 
-// ----------------- helpers -----------------
 function clonePts(arr){ return arr.map(p => ({...p})); }
 
 function pushHistory(){
@@ -192,7 +199,22 @@ function canvasXY(ev, canvas){
   return {x,y};
 }
 
-function rpxFromMm(dmm){ return (dmm/2) / mmPerPx; }
+// перевод мм -> px радиуса для детектора
+function rpxFromMm(dmm){
+  return (dmm/2) / mmPerPx();
+}
+
+// пересчёт dMm для уже найденных точек при изменении frame/calib
+function recomputeDiametersInPlace(){
+  const mpp = mmPerPx();
+  const k = CALIB();
+  for(const p of points){
+    p.dMm = (2 * p.r) * mpp * k;
+  }
+  for(const p of basePoints){
+    p.dMm = (2 * p.r) * mpp * k;
+  }
+}
 
 // ----------------- Stats -----------------
 function classify(dMm){
@@ -219,7 +241,7 @@ function stats(){
   return { n, avg: n? (sum/n):0, buckets };
 }
 
-// ----------------- Redraw + LIVE output -----------------
+// ----------------- Redraw + Live -----------------
 function redrawRect(){
   if(!lastWarped) return;
 
@@ -251,7 +273,7 @@ function redrawRect(){
 Средний диаметр: ${st.avg.toFixed(1)} мм
 Классы: 4–6=${st.buckets["4–6"]}, 6–10=${st.buckets["6–10"]}, 10–20=${st.buckets["10–20"]}, 20+=${st.buckets["20+"]}
 Sensitivity: ${s}
-Масштаб: ${mmPerPx.toFixed(4)} мм/px
+Масштаб: ${mmPerPx().toFixed(4)} мм/px  Calib: ×${CALIB().toFixed(2)}
 Правки: manual=${manualCount}, excluded=${excludedCount}`;
 
   setOut(text, st.n ? "ok" : "bad");
@@ -260,7 +282,7 @@ Sensitivity: ${s}
   updateUI();
 }
 
-// ----------------- image helpers -----------------
+// ----------------- Image helpers -----------------
 function fileToImg(f){
   return new Promise((resolve, reject) => {
     const i = new Image();
@@ -296,7 +318,7 @@ function drawSource(){
   }
 }
 
-// ----------------- perspective warp -----------------
+// ----------------- Perspective warp -----------------
 function warpToRect(sourceCanvas, srcPts, dstW, dstH){
   const dstPts = [{x:0,y:0},{x:dstW-1,y:0},{x:dstW-1,y:dstH-1},{x:0,y:dstH-1}];
   const H = computeHomography(dstPts, srcPts);
@@ -348,24 +370,20 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ----------------- DoG blob detection -----------------
+// ----------------- DoG (multi-scale) -----------------
 function detectBlobsDoG(imageData, w, h, sensitivity){
-  // sensitivity 1..20 -> lower = stricter, higher = more detections
-  const thr = 18 - sensitivity*0.7; // ~17.3 .. ~4
+  const thr = 18 - sensitivity*0.7;
   const thr2 = Math.max(3, thr);
 
-  // grayscale
   const d = imageData.data;
   const g = new Float32Array(w*h);
   for(let i=0;i<w*h;i++){
     g[i] = 0.2126*d[i*4] + 0.7152*d[i*4+1] + 0.0722*d[i*4+2];
   }
 
-  // remove slow background
   const bg = boxBlur(g,w,h,18);
   for(let i=0;i<w*h;i++) g[i] = g[i] - bg[i];
 
-  // scales
   const rMin = rpxFromMm(Math.max(3.5, DMIN_MM()));
   const rMax = rpxFromMm(DMAX_DETECT_MM);
 
@@ -389,17 +407,13 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
         const idx = y*w + x;
         const v = dog[idx];
         if(v < thr2) continue;
-
-        // local max 3x3
         if(v < dog[idx-1] || v < dog[idx+1] || v < dog[idx-w] || v < dog[idx+w]) continue;
         if(v < dog[idx-w-1] || v < dog[idx-w+1] || v < dog[idx+w-1] || v < dog[idx+w+1]) continue;
-
         candidates.push({x,y,score:v,r});
       }
     }
   }
 
-  // NMS
   candidates.sort((p,q)=>q.score-p.score);
   const kept = [];
   const minDist = 10;
@@ -413,17 +427,18 @@ function detectBlobsDoG(imageData, w, h, sensitivity){
     }
     if(!ok) continue;
 
-    const dMm = (2*c.r) * mmPerPx;
+    // Диаметр в мм = 2r(px) * mm/px * calib
+    const dMm = (2*c.r) * mmPerPx() * CALIB();
     if(dMm < 2.5) continue;
     if(dMm > (DMAX_DETECT_MM + 5)) continue;
 
     kept.push({ x:c.x, y:c.y, r:c.r, dMm });
-    if(kept.length > 500) break;
+    if(kept.length > 520) break;
   }
   return kept;
 }
 
-// ----------------- blurs -----------------
+// ----------------- Blurs -----------------
 function gaussianBlurSep(src,w,h,sigma){
   const r = Math.max(1, Math.ceil(sigma*2.5));
   const k = gaussianKernel1D(sigma, r);
@@ -484,10 +499,42 @@ function boxBlur(src,w,h,r){
   return dst;
 }
 
-// ----------------- Events (load/pick/run) -----------------
+// ----------------- Edit actions -----------------
+function toggleAt(x,y){
+  const idx = nearestPoint(x,y,PICK_R);
+  if(idx < 0) return;
+  pushHistory();
+  points[idx].excluded = !points[idx].excluded;
+  redrawRect();
+}
+function addManualAt(x,y){
+  pushHistory();
+  const dMm = Math.max(6.0, DMIN_MM());
+  const r = (dMm/2) / mmPerPx(); // manual радиус в px по текущему масштабу
+  points.push({x,y,r,dMm,src:"manual",excluded:false});
+  redrawRect();
+}
+function startDragAt(x,y){
+  const idx = nearestPoint(x,y,PICK_R);
+  if(idx < 0) return;
+  dragging = true;
+  dragIdx = idx;
+  pushHistory();
+  if(points[dragIdx].src === "auto") points[dragIdx].src = "manual";
+}
+function moveDragTo(x,y){
+  if(!dragging || dragIdx<0) return;
+  points[dragIdx].x = x;
+  points[dragIdx].y = y;
+  redrawRect();
+}
+function endDrag(){ dragging=false; dragIdx=-1; }
+
+// ----------------- Events -----------------
 input.addEventListener("change", async () => {
   corners = []; picking = false;
   basePoints = []; points = []; history = []; lastWarped = null;
+  scaleDirty = false;
   try{
     imgObj = await fileToImg(input.files[0]);
     drawSource();
@@ -543,48 +590,11 @@ runBtn.addEventListener("click", () => {
 
   history = [];
   points = clonePts(basePoints);
+  scaleDirty = false;
   redrawRect();
 });
 
-// ----------------- Editing actions -----------------
-function toggleAt(x,y){
-  const idx = nearestPoint(x,y,PICK_R);
-  if(idx < 0) return;
-  pushHistory();
-  points[idx].excluded = !points[idx].excluded;
-  redrawRect();
-}
-
-function addManualAt(x,y){
-  pushHistory();
-  const dMm = Math.max(6.0, DMIN_MM());
-  const r = (dMm/2) / mmPerPx;
-  points.push({x,y,r,dMm,src:"manual",excluded:false});
-  redrawRect();
-}
-
-function startDragAt(x,y){
-  const idx = nearestPoint(x,y,PICK_R);
-  if(idx < 0) return;
-  dragging = true;
-  dragIdx = idx;
-  pushHistory();
-  if(points[dragIdx].src === "auto") points[dragIdx].src = "manual";
-}
-
-function moveDragTo(x,y){
-  if(!dragging || dragIdx<0) return;
-  points[dragIdx].x = x;
-  points[dragIdx].y = y;
-  redrawRect();
-}
-
-function endDrag(){
-  dragging = false;
-  dragIdx = -1;
-}
-
-// Desktop mouse support
+// Desktop mouse
 cRect.addEventListener("mousedown", (ev)=>{
   if(!lastWarped) return;
   const p = canvasXY(ev, cRect);
@@ -614,7 +624,7 @@ cRect.addEventListener("mouseup", (ev)=>{
   else toggleAt(p.x,p.y);
 });
 
-// iOS touch (reliable single tap + double tap + drag)
+// iOS touch
 cRect.addEventListener("touchstart", (ev)=>{
   if(!lastWarped) return;
   ev.preventDefault();
@@ -656,60 +666,81 @@ cRect.addEventListener("touchend", (ev)=>{
     return;
   }
 
-  // single tap toggle (если это не был double tap)
   if(!doubleHandled && lastTapPos){
     toggleAt(lastTapPos.x, lastTapPos.y);
   }
 }, {passive:false});
 
-// ----------------- Buttons -----------------
+// Buttons
 undoBtn.addEventListener("click", ()=>{
   if(!history.length) return;
   const prev = history.pop();
   points = JSON.parse(prev);
   redrawRect();
 });
-
 clearManualBtn.addEventListener("click", ()=>{
   if(!points.length) return;
   pushHistory();
   points = points.filter(p => p.src !== "manual");
   redrawRect();
 });
-
 resetEditsBtn.addEventListener("click", ()=>{
   history = [];
   points = clonePts(basePoints);
   redrawRect();
 });
-
 exportBtn.addEventListener("click", ()=>{
   const payload = {
-    version: "A1.8_FULL",
-    frame_mm: FRAME_MM,
+    version: "A1.9_FULL",
     rect_px: RECT,
-    mm_per_px: mmPerPx,
+    frame_mm: FRAME_MM(),
+    mm_per_px: mmPerPx(),
+    calib: CALIB(),
     min_mm: DMIN_MM(),
-    detect_max_mm: DMAX_DETECT_MM,
     sensitivity: parseInt(sens.value,10),
+    detect_max_mm: DMAX_DETECT_MM,
     points: points
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "mwc_a1_8_points.json";
+  a.download = "mwc_a1_9_points.json";
   a.click();
 });
-
 savePngBtn.addEventListener("click", ()=>{
   if(!lastWarped) return;
   const a = document.createElement("a");
   a.href = cRect.toDataURL("image/png");
-  a.download = "mwc_a1_8_marked.png";
+  a.download = "mwc_a1_9_marked.png";
   a.click();
 });
 
-// init
+// Scale / Calib change handlers
+framemm.addEventListener("input", ()=>{
+  framemmVal.textContent = `${FRAME_MM()} мм`;
+  if(lastWarped){
+    scaleDirty = true;
+    recomputeDiametersInPlace(); // чтобы хотя бы цифры обновились
+    redrawRect();
+  }
+});
+calib.addEventListener("input", ()=>{
+  calibVal.textContent = `×${CALIB().toFixed(2)}`;
+  if(lastWarped){
+    scaleDirty = true;
+    recomputeDiametersInPlace();
+    redrawRect();
+  }
+});
+sens.addEventListener("input", ()=> sensVal.textContent = sens.value);
+minmm.addEventListener("input", ()=> {
+  minmmVal.textContent = Number(minmm.value).toFixed(1);
+  if(lastWarped) redrawRect();
+});
+
+// init labels
+framemmVal.textContent = `${FRAME_MM()} мм`;
+calibVal.textContent = `×${CALIB().toFixed(2)}`;
 sensVal.textContent = sens.value;
 minmmVal.textContent = Number(minmm.value).toFixed(1);
 updateUI();
