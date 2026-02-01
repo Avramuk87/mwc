@@ -39,7 +39,7 @@
 <div class="card">
   <b>Разметка</b>
   <canvas id="cv"></canvas>
-  <div class="small">🟡 — твои метки</div>
+  <div class="small">🔴 — твои метки (диаметр +1 мм)</div>
 </div>
 
 <div class="card">
@@ -70,6 +70,18 @@ let history = [];   // stack of JSON strings
 let dragging = false;
 let dragIdx = -1;
 let pressTimer = null;
+
+/* ===========================
+   НАСТРОЙКА МЕТКИ
+   Требование: "красная" + "диаметр больше на 1 мм"
+   В этой версии делаем практично:
+   - красный цвет
+   - диаметр +1 мм ≈ +4 px (на твоих фото визуально соответствует)
+   Было: радиус 10px (диаметр 20px)
+   Стало: радиус 12px (диаметр 24px)  => +4px по диаметру
+=========================== */
+const MARK_COLOR = "#ff0000"; // red
+const MARK_RADIUS_PX = 12;   // было 10
 
 // --- UI ---
 function setStatus(text, cls=""){
@@ -122,10 +134,10 @@ function draw(){
   ctx.drawImage(imgObj, 0, 0, cv.width, cv.height);
 
   ctx.lineWidth = 3;
-  ctx.strokeStyle = "#ffd400"; // yellow
+  ctx.strokeStyle = MARK_COLOR; // red
   for(const m of marks){
     ctx.beginPath();
-    ctx.arc(m.x, m.y, 10, 0, Math.PI*2);
+    ctx.arc(m.x, m.y, MARK_RADIUS_PX, 0, Math.PI*2);
     ctx.stroke();
   }
 
@@ -275,7 +287,8 @@ exportBtn.addEventListener("click", ()=>{
     version: "MWC_MANUAL_COUNTER_v1",
     created_at: new Date().toISOString(),
     count: marks.length,
-    marks: marks
+    marks: marks,
+    mark_style: { color: MARK_COLOR, radius_px: MARK_RADIUS_PX }
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
   const a = document.createElement("a");
