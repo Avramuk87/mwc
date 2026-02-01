@@ -2,429 +2,162 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 PRO</title>
-<meta name="theme-color" content="#111111">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MWC — A1.7 (пины &gt;4 мм)</title>
+
+<script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
+
 <style>
-  body{font-family:-apple-system,system-ui,Arial;margin:16px}
-  h1{font-size:20px;margin:0 0 8px}
-  .small{font-size:13px;color:#555;margin:6px 0}
-  .card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
-  button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:900}
-  button.secondary{background:#fff;color:#111}
-  button:disabled{opacity:.45}
-  input{width:100%;margin:8px 0}
-  pre{white-space:pre-wrap;margin:0}
-  canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipulation}
-  .ok{color:#0a7;font-weight:700}
-  .warn{color:#c90;font-weight:700}
-  .bad{color:#c00;font-weight:700}
-  .row{display:flex;gap:10px;flex-wrap:wrap}
-  .row > button{flex:1;min-width:160px}
+body{font-family:-apple-system,system-ui,Arial;margin:16px}
+h1{font-size:22px}
+.card{border:1px solid #ddd;border-radius:14px;padding:14px;margin:14px 0}
+button{width:100%;padding:14px;border-radius:12px;border:none;
+background:#000;color:#fff;font-weight:700;font-size:16px}
+button:disabled{opacity:.4}
+canvas{max-width:100%;border-radius:12px;margin-top:12px}
+.ok{color:#0a7;font-weight:700}
+.bad{color:#c00;font-weight:700}
+.small{color:#666;font-size:13px}
 </style>
 </head>
 
 <body>
-<h1>MWC — A1.6 PRO (точные &gt;4 мм)</h1>
-<div class="small">
-Шаги: 1) выбери фото → 2) выбери 4 угла рамки 20×20 (ЛВ→ПВ→ПН→ЛН) → 3) распрямить и посчитать пины &gt;4 мм.
+
+<h1>MWC — A1.7 (пины &gt;4 мм)</h1>
+<p class="small">
+Рамка 20×20 см ОБЯЗАТЕЛЬНО целиком в кадре. Фото строго сверху.
+</p>
+
+<div class="card">
+<input type="file" id="file" accept="image/*">
+<button id="analyze" disabled>АНАЛИЗ</button>
+<p id="status" class="small">Загрузи фото</p>
 </div>
 
 <div class="card">
-  <b>Фото (из галереи)</b>
-  <input id="img" type="file" accept="image/*">
-  <div class="row">
-    <button id="pick" class="secondary" disabled>Выбрать 4 угла рамки</button>
-    <button id="run" disabled>Распремить + Анализ</button>
-  </div>
-  <div class="small" id="hint">Выбери фото.</div>
-</div>
-
-<div class="card"><pre id="out">Загрузи фото.</pre></div>
-
-<div class="card">
-  <b>Исходное фото (кликни 4 угла рамки)</b>
-  <canvas id="src"></canvas>
-  <div class="small" id="cornerHelp">
-    Углы: 1) ЛВ  2) ПВ  3) ПН  4) ЛН
-  </div>
+<canvas id="canvas"></canvas>
 </div>
 
 <div class="card">
-  <b>Распремлённая рамка 20×20 (800×800)</b>
-  <canvas id="rect"></canvas>
-  <div class="small">Зелёным — найденные пины &gt;4 мм.</div>
+<div id="result"></div>
 </div>
 
 <script>
-const input = document.getElementById("img");
-const pickBtn = document.getElementById("pick");
-const runBtn  = document.getElementById("run");
-const hint = document.getElementById("hint");
-const out  = document.getElementById("out");
-const cSrc = document.getElementById("src");
-const cRect= document.getElementById("rect");
-const srcCtx = cSrc.getContext("2d", { willReadFrequently:true });
-const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
+let img = new Image();
+let canvas = document.getElementById('canvas');
+let ctx = canvas.getContext('2d');
+let ready = false;
 
-function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
-function hasFile(){ return input.files && input.files[0]; }
+file.onchange = e => {
+  const f = e.target.files[0];
+  if(!f) return;
+  img.onload = () => {
+    canvas.width = img.width;
+    canvas.height = img.height;
+    ctx.drawImage(img,0,0);
+    analyze.disabled = false;
+    status.textContent = "Фото загружено. Нажми «АНАЛИЗ»";
+  };
+  img.src = URL.createObjectURL(f);
+};
 
-let imgObj = null;
-let picking = false;
-let corners = []; // [{x,y}] in source-canvas coords
-let lastDrawW = 0, lastDrawH = 0;
-
-const RECT_SIZE = 800;        // распрямлённый квадрат
-const FRAME_MM  = 200;        // 20 см
-const mmPerPxExact = FRAME_MM / RECT_SIZE; // точный!
-
-function updateUI(){
-  pickBtn.disabled = !imgObj;
-  runBtn.disabled = !(imgObj && corners.length === 4);
-  if (!imgObj) hint.textContent = "Выбери фото.";
-  else if (corners.length < 4) hint.textContent = "Нажми «Выбрать 4 угла рамки» и ткни 4 угла.";
-  else hint.textContent = "Готово. Нажми «Распремить + Анализ».";
-}
-updateUI();
-
-input.addEventListener("change", async () => {
-  corners = [];
-  picking = false;
-  setOut("Фото выбрано. Нажми «Выбрать 4 угла рамки».");
-  try{
-    imgObj = await fileToImg(input.files[0]);
-    drawSourceImage();
-  }catch(e){
-    imgObj = null;
-    setOut("Ошибка загрузки фото: " + String(e), "bad");
-  }
-  updateUI();
-});
-
-pickBtn.addEventListener("click", () => {
-  if (!imgObj) return;
-  corners = [];
-  picking = true;
-  setOut("Режим выбора углов: ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН).", "warn");
-  drawSourceImage();
-  updateUI();
-});
-
-cSrc.addEventListener("click", (ev) => {
-  if (!picking) return;
-  const r = cSrc.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (cSrc.width  / r.width);
-  const y = (ev.clientY - r.top)  * (cSrc.height / r.height);
-  corners.push({x,y});
-  drawSourceImage();
-  if (corners.length === 4){
-    picking = false;
-    setOut("Углы выбраны. Нажми «Распремить + Анализ».", "ok");
-  }
-  updateUI();
-});
-
-runBtn.addEventListener("click", () => {
-  if (!imgObj || corners.length !== 4) return;
-  setOut("Распремляю рамку…", "warn");
-  // 1) perspective warp source canvas -> rect canvas
-  const rectImageData = warpToRect(cSrc, corners, RECT_SIZE, RECT_SIZE);
-  cRect.width = RECT_SIZE;
-  cRect.height= RECT_SIZE;
-  rectCtx.putImageData(rectImageData, 0, 0);
-
-  // 2) analyze rectified image
-  setOut("Анализ пинов…", "warn");
-  const res = analyzeRectified(rectImageData, RECT_SIZE, RECT_SIZE);
-
-  // 3) draw circles on rect canvas
-  rectCtx.putImageData(rectImageData, 0, 0);
-  rectCtx.lineWidth = 3;
-  rectCtx.strokeStyle = "#00ff00";
-  let sum = 0;
-  for (const p of res.pins){
-    sum += p.dMm;
-    rectCtx.beginPath();
-    rectCtx.arc(p.cx, p.cy, Math.max(6, p.dPx/2), 0, Math.PI*2);
-    rectCtx.stroke();
-  }
-
-  const n = res.pins.length;
-  const avg = n ? (sum/n).toFixed(1) : "0.0";
-  setOut(
-    `✅ ТОЧНЫЙ РЕЗУЛЬТАТ (рамка 20×20 учтена)\n`+
-    `Пинов >4 мм: ${n}\n`+
-    `Средний диаметр: ${avg} мм\n`+
-    `Коэффициент: ${mmPerPxExact.toFixed(4)} мм/пикс`,
-    n ? "ok" : "bad"
-  );
-});
-
-// ---------- helpers ----------
-function fileToImg(f){
-  return new Promise((resolve, reject) => {
-    const i = new Image();
-    i.onload = () => resolve(i);
-    i.onerror = reject;
-    i.src = URL.createObjectURL(f);
+function waitCV(){
+  return new Promise(r=>{
+    let t=setInterval(()=>{
+      if(cv && cv.imread){clearInterval(t);r();}
+    },200);
   });
 }
 
-function drawSourceImage(){
-  if (!imgObj) return;
+analyze.onclick = async ()=>{
+  analyze.disabled=true;
+  status.textContent="Анализ...";
+  await waitCV();
 
-  // fit to screen but keep enough resolution
-  const maxW = 1100;
-  const w0 = imgObj.naturalWidth, h0 = imgObj.naturalHeight;
-  const sc = Math.min(1, maxW / w0);
-  const w = Math.max(1, Math.round(w0 * sc));
-  const h = Math.max(1, Math.round(h0 * sc));
-  lastDrawW = w; lastDrawH = h;
+  let src = cv.imread(canvas);
+  let gray = new cv.Mat();
+  cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-  cSrc.width = w; cSrc.height = h;
-  srcCtx.clearRect(0,0,w,h);
-  srcCtx.drawImage(imgObj, 0, 0, w, h);
+  // --- ПОИСК РАМКИ ---
+  let edges = new cv.Mat();
+  cv.Canny(gray, edges, 80, 200);
 
-  // draw corner markers
-  if (corners.length){
-    srcCtx.lineWidth = 4;
-    srcCtx.strokeStyle = "#00ff00";
-    srcCtx.fillStyle = "#00ff00";
-    srcCtx.font = "24px -apple-system, system-ui, Arial";
+  let contours = new cv.MatVector();
+  let hier = new cv.Mat();
+  cv.findContours(edges, contours, hier,
+    cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
-    corners.forEach((p, i) => {
-      srcCtx.beginPath();
-      srcCtx.arc(p.x, p.y, 10, 0, Math.PI*2);
-      srcCtx.fill();
-      srcCtx.fillText(String(i+1), p.x+14, p.y-14);
-    });
-
-    if (corners.length === 4){
-      srcCtx.beginPath();
-      srcCtx.moveTo(corners[0].x, corners[0].y);
-      for(let i=1;i<4;i++) srcCtx.lineTo(corners[i].x, corners[i].y);
-      srcCtx.closePath();
-      srcCtx.stroke();
+  let frame = null, maxArea=0;
+  for(let i=0;i<contours.size();i++){
+    let c = contours.get(i);
+    let r = cv.boundingRect(c);
+    let area = r.width*r.height;
+    if(area>maxArea && r.width>200 && r.height>200){
+      maxArea=area; frame=r;
     }
   }
-}
 
-// ---------- perspective warp ----------
-// corners order: TL, TR, BR, BL in source canvas coords
-function warpToRect(sourceCanvas, srcPts, dstW, dstH){
-  // destination points (rect)
-  const dstPts = [
-    {x:0,     y:0},
-    {x:dstW-1,y:0},
-    {x:dstW-1,y:dstH-1},
-    {x:0,     y:dstH-1}
-  ];
+  if(!frame){
+    result.innerHTML="<span class='bad'>Рамка не найдена</span>";
+    analyze.disabled=false; return;
+  }
 
-  // compute homography mapping dst -> src (inverse warp: for each dst pixel sample src)
-  const H = computeHomography(dstPts, srcPts); // maps dst -> src
+  let pxPerMM = frame.width / 200; // 20 см = 200 мм
 
-  const sCtx = sourceCanvas.getContext("2d", { willReadFrequently:true });
-  const sW = sourceCanvas.width, sH = sourceCanvas.height;
-  const sData = sCtx.getImageData(0,0,sW,sH).data;
+  // --- ПОИСК ПИНОВ ---
+  let blur = new cv.Mat();
+  cv.GaussianBlur(gray, blur, new cv.Size(5,5),0);
 
-  const out = new ImageData(dstW, dstH);
-  const o = out.data;
+  let bin = new cv.Mat();
+  cv.adaptiveThreshold(
+    blur, bin, 255,
+    cv.ADAPTIVE_THRESH_GAUSSIAN_C,
+    cv.THRESH_BINARY, 21, -5
+  );
 
-  for(let y=0;y<dstH;y++){
-    for(let x=0;x<dstW;x++){
-      const [sx, sy] = applyH(H, x, y);
-      const ix = Math.floor(sx), iy = Math.floor(sy);
-      const di = (y*dstW + x)*4;
-      if (ix>=0 && iy>=0 && ix<sW && iy<sH){
-        const si = (iy*sW + ix)*4;
-        o[di]   = sData[si];
-        o[di+1] = sData[si+1];
-        o[di+2] = sData[si+2];
-        o[di+3] = 255;
-      }else{
-        o[di]=o[di+1]=o[di+2]=0; o[di+3]=255;
-      }
+  let cnts = new cv.MatVector();
+  cv.findContours(bin, cnts, hier,
+    cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+  let count=0, sum=0;
+
+  ctx.drawImage(img,0,0);
+
+  for(let i=0;i<cnts.size();i++){
+    let c = cnts.get(i);
+    let area = cv.contourArea(c);
+    if(area<20) continue;
+
+    let peri = cv.arcLength(c,true);
+    let circ = 4*Math.PI*area/(peri*peri);
+    if(circ<0.65) continue;
+
+    let dPx = Math.sqrt(4*area/Math.PI);
+    let dMM = dPx / pxPerMM;
+
+    if(dMM>=4 && dMM<=12){
+      let m=cv.moments(c);
+      let x=m.m10/m.m00;
+      let y=m.m01/m.m00;
+      ctx.strokeStyle="#00ff00";
+      ctx.lineWidth=3;
+      ctx.beginPath();
+      ctx.arc(x,y,dPx/2,0,2*Math.PI);
+      ctx.stroke();
+      count++; sum+=dMM;
     }
   }
-  return out;
-}
 
-function applyH(H, x, y){
-  const a = H[0]*x + H[1]*y + H[2];
-  const b = H[3]*x + H[4]*y + H[5];
-  const c = H[6]*x + H[7]*y + H[8];
-  return [a/c, b/c];
-}
+  result.innerHTML =
+    "<div class='ok'>Пинов &gt;4 мм: "+count+
+    "<br>Средний диаметр: "+
+    (count? (sum/count).toFixed(1):"0")+" мм</div>";
 
-// Compute homography from 4 point pairs: p -> q (DLT), returns 3x3 flat array
-function computeHomography(p, q){
-  // Solve A*h = b for 8 unknowns (h8=1)
-  const A = [];
-  const b = [];
-  for(let i=0;i<4;i++){
-    const x = p[i].x, y = p[i].y;
-    const u = q[i].x, v = q[i].y;
-
-    A.push([x, y, 1, 0, 0, 0, -x*u, -y*u]); b.push(u);
-    A.push([0, 0, 0, x, y, 1, -x*v, -y*v]); b.push(v);
-  }
-  const h = solveLinear8(A, b); // 8 params
-  return [h[0],h[1],h[2], h[3],h[4],h[5], h[6],h[7],1];
-}
-
-// Gaussian elimination for 8x8
-function solveLinear8(A, b){
-  const n = 8;
-  // build augmented
-  const M = Array.from({length:n}, (_,i)=> A[i].slice().concat([b[i]]));
-  for(let col=0; col<n; col++){
-    // pivot
-    let pivot = col;
-    for(let r=col+1;r<n;r++){
-      if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot=r;
-    }
-    const tmp = M[col]; M[col]=M[pivot]; M[pivot]=tmp;
-
-    const div = M[col][col] || 1e-12;
-    for(let c=col; c<=n; c++) M[col][c] /= div;
-
-    for(let r=0; r<n; r++){
-      if (r===col) continue;
-      const f = M[r][col];
-      for(let c=col; c<=n; c++) M[r][c] -= f*M[col][c];
-    }
-  }
-  return M.map(row => row[n]);
-}
-
-// ---------- analysis on rectified image (exact mm) ----------
-function boxBlurGray(src, w, h, radius){
-  const dst = new Float32Array(w*h);
-  const r = radius|0;
-  const iw = w+1;
-  const integ = new Float32Array((w+1)*(h+1));
-  for(let y=1;y<=h;y++){
-    let rowsum = 0;
-    for(let x=1;x<=w;x++){
-      rowsum += src[(y-1)*w + (x-1)];
-      integ[y*iw + x] = integ[(y-1)*iw + x] + rowsum;
-    }
-  }
-  for(let y=0;y<h;y++){
-    const y0 = Math.max(0, y-r), y1 = Math.min(h-1, y+r);
-    for(let x=0;x<w;x++){
-      const x0 = Math.max(0, x-r), x1 = Math.min(w-1, x+r);
-      const A = integ[y0*iw + x0];
-      const B = integ[y0*iw + (x1+1)];
-      const C = integ[(y1+1)*iw + x0];
-      const D = integ[(y1+1)*iw + (x1+1)];
-      const area = (x1-x0+1)*(y1-y0+1);
-      dst[y*w + x] = (D - B - C + A) / area;
-    }
-  }
-  return dst;
-}
-
-function dilate(bin,w,h){
-  const out = new Uint8Array(w*h);
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const p=y*w+x;
-      const v = bin[p]||bin[p-1]||bin[p+1]||bin[p-w]||bin[p+w]||bin[p-w-1]||bin[p-w+1]||bin[p+w-1]||bin[p+w+1];
-      out[p]=v?1:0;
-    }
-  }
-  return out;
-}
-function erode(bin,w,h){
-  const out = new Uint8Array(w*h);
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const p=y*w+x;
-      const v = bin[p]&&bin[p-1]&&bin[p+1]&&bin[p-w]&&bin[p+w]&&bin[p-w-1]&&bin[p-w+1]&&bin[p+w-1]&&bin[p+w+1];
-      out[p]=v?1:0;
-    }
-  }
-  return out;
-}
-
-function connectedComponents(bin,w,h){
-  const vis = new Uint8Array(w*h);
-  const stack = [];
-  const comps = [];
-  const idx=(x,y)=>y*w+x;
-
-  for(let y=1;y<h-1;y++){
-    for(let x=1;x<w-1;x++){
-      const p = idx(x,y);
-      if(!bin[p]||vis[p]) continue;
-
-      let area=0,sumX=0,sumY=0,per=0;
-      stack.length=0;
-      stack.push(p); vis[p]=1;
-
-      while(stack.length){
-        const q=stack.pop();
-        const qy=(q/w)|0;
-        const qx=q-qy*w;
-
-        area++; sumX+=qx; sumY+=qy;
-
-        const n1=q-1,n2=q+1,n3=q-w,n4=q+w;
-        if(!bin[n1]) per++;
-        if(!bin[n2]) per++;
-        if(!bin[n3]) per++;
-        if(!bin[n4]) per++;
-
-        if(bin[n1]&&!vis[n1]){vis[n1]=1;stack.push(n1);}
-        if(bin[n2]&&!vis[n2]){vis[n2]=1;stack.push(n2);}
-        if(bin[n3]&&!vis[n3]){vis[n3]=1;stack.push(n3);}
-        if(bin[n4]&&!vis[n4]){vis[n4]=1;stack.push(n4);}
-      }
-      comps.push({area,cx:sumX/area,cy:sumY/area,per});
-    }
-  }
-  return comps;
-}
-
-function analyzeRectified(imageData, w, h){
-  const d = imageData.data;
-  const gray = new Float32Array(w*h);
-  for(let i=0;i<w*h;i++){
-    const r=d[i*4], g=d[i*4+1], b=d[i*4+2];
-    gray[i]=0.2126*r+0.7152*g+0.0722*b;
-  }
-
-  // параметры (можно потом вынести в настройки)
-  const bgRadius = 18;
-  const thrOffset = 18;
-  const minArea = 18;
-  const minCirc = 0.28;
-
-  const bg = boxBlurGray(gray,w,h,bgRadius);
-  let bin = new Uint8Array(w*h);
-  for(let i=0;i<w*h;i++){
-    bin[i] = (gray[i] > bg[i] + thrOffset) ? 1 : 0;
-  }
-  bin = erode(dilate(bin,w,h),w,h);
-
-  const comps = connectedComponents(bin,w,h);
-  const pins = [];
-  for(const c of comps){
-    if (c.area < minArea) continue;
-    const circ = (c.per>0) ? (4*Math.PI*c.area/(c.per*c.per)) : 0;
-    if (circ < minCirc) continue;
-
-    const dPx = 2*Math.sqrt(c.area/Math.PI);
-    const dMm = dPx * mmPerPxExact; // ТОЧНО!
-
-    if (dMm >= 4){
-      pins.push({cx:c.cx, cy:c.cy, dPx, dMm, circ, area:c.area});
-    }
-  }
-  return {pins};
-}
+  src.delete();gray.delete();edges.delete();
+  blur.delete();bin.delete();
+  analyze.disabled=false;
+};
 </script>
+
 </body>
 </html>
