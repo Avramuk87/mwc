@@ -3,33 +3,34 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 FINAL PRO v4</title>
+<title>MWC — A1.6 BLOB FINAL</title>
 <meta name="theme-color" content="#111">
 <style>
-body{font-family:-apple-system,system-ui,Arial;margin:16px}
-h1{font-size:20px;margin:0 0 8px}
-.small{font-size:13px;color:#555;margin:6px 0}
-.card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
-button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:800}
-button.secondary{background:#fff;color:#111}
-button:disabled{opacity:.45}
-input{width:100%;margin:8px 0}
-pre{white-space:pre-wrap;margin:0}
-canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipulation}
-.ok{color:#0a7;font-weight:700}
-.bad{color:#c00;font-weight:700}
-.warn{color:#c90;font-weight:700}
-.row{display:flex;gap:10px;flex-wrap:wrap}
-.row > button{flex:1;min-width:160px}
+  body{font-family:-apple-system,system-ui,Arial;margin:16px}
+  h1{font-size:20px;margin:0 0 8px}
+  .small{font-size:13px;color:#555;margin:6px 0}
+  .card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
+  button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:800}
+  button.secondary{background:#fff;color:#111}
+  button:disabled{opacity:.45}
+  input[type="file"]{width:100%;margin:8px 0}
+  input[type="range"]{width:100%}
+  pre{white-space:pre-wrap;margin:0}
+  canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipulation}
+  .ok{color:#0a7;font-weight:700}
+  .bad{color:#c00;font-weight:700}
+  .warn{color:#c90;font-weight:700}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .row > button{flex:1;min-width:160px}
+  .kv{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#333}
 </style>
 </head>
 
 <body>
-<h1>MWC — A1.6 FINAL PRO v4</h1>
+<h1>MWC — A1.6 BLOB FINAL (только 4–12 мм)</h1>
 <div class="small">
-🟢 = пины <b>4–12 мм</b> (в рост) • 🟡 = <b>2–4 мм</b> (мелочь)<br>
-Фикс против мусора: фильтр по <b>контрасту над фоном</b> внутри объекта.<br>
-Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>
+Метод: DoG blob detection (устойчив к текстуре/мицелию).<br>
+Углы рамки: <b>ЛВ → ПВ → ПН → ЛН</b>. Считаем только <b>4–12 мм</b> (в рост).
 </div>
 
 <div class="card">
@@ -39,6 +40,11 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
     <button id="pick" class="secondary" disabled>Выбрать 4 угла</button>
     <button id="run" disabled>Анализ</button>
   </div>
+
+  <label class="small"><b>Sensitivity</b> (меньше = строже, больше = больше пинов)</label>
+  <input id="sens" type="range" min="1" max="20" value="8">
+  <div class="small kv" id="sensVal">8</div>
+
   <div class="small" id="hint">Выбери фото.</div>
 </div>
 
@@ -53,7 +59,7 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 <div class="card">
   <b>Распремлённая рамка (800×800)</b>
   <canvas id="rect"></canvas>
-  <div class="small">🟢 4–12 мм • 🟡 2–4 мм</div>
+  <div class="small">🟢 — найденные пины 4–12 мм</div>
 </div>
 
 <script>
@@ -66,6 +72,10 @@ const cSrc = document.getElementById("src");
 const cRect= document.getElementById("rect");
 const srcCtx = cSrc.getContext("2d", { willReadFrequently:true });
 const rectCtx= cRect.getContext("2d", { willReadFrequently:true });
+const sens = document.getElementById("sens");
+const sensVal = document.getElementById("sensVal");
+
+sens.addEventListener("input", ()=> sensVal.textContent = sens.value);
 
 let imgObj = null;
 let picking = false;
@@ -73,23 +83,16 @@ let corners = [];
 
 const RECT = 800;
 const FRAME_MM = 200;
-const mmPerPx = FRAME_MM / RECT;
+const mmPerPx = FRAME_MM / RECT;      // 0.25 мм/px
 
-// --- КОНСТАНТЫ (под твои фото) ---
-const BG_RADIUS = 22;         // фон (больше = меньше влияние текстуры)
-const THR_BIN = 10;           // порог для маски (gray-bg)
-const MIN_AREA = 22;          // минимум площади в пикселях
-const MIN_CIRC = 0.24;        // форма (0.24 мягче, но режет ниточки)
-const MIN_MM = 2.0;           // ниже этого мусор не считаем вообще
-const SMALL_MIN = 2.0, SMALL_MAX = 4.0;
-const GROW_MIN  = 4.0, GROW_MAX  = 12.0;
+// Диапазон по мм (только рост)
+const DMIN_MM = 4.0;
+const DMAX_MM = 12.0;
 
-// КЛЮЧ: фильтр контраста над фоном (среднее gray-bg внутри объекта)
-const MEAN_V_SMALL = 10;      // мелочь должна быть реально яркой
-const MEAN_V_GROW  = 12;      // в рост — ещё строже (режет мицелий)
-
-// склейка близких (умеренная)
-const MERGE_PX = 9;
+// Конвертация в радиусы в пикселях
+function rpxFromMm(dmm){ return (dmm/2) / mmPerPx; }
+const RMIN = rpxFromMm(DMIN_MM); // ~8 px
+const RMAX = rpxFromMm(DMAX_MM); // ~24 px
 
 function setOut(t, cls=""){ out.className = cls; out.textContent = t; }
 function updateUI(){
@@ -135,44 +138,36 @@ cSrc.addEventListener("click", (ev) => {
 
 runBtn.addEventListener("click", () => {
   if (!imgObj || corners.length !== 4) return;
-  setOut("Распремление и анализ…", "warn");
+
+  setOut("Распремление и blob-анализ…", "warn");
 
   const warped = warpToRect(cSrc, corners, RECT, RECT);
   cRect.width = RECT; cRect.height = RECT;
   rectCtx.putImageData(warped, 0, 0);
 
-  const {small, grow} = analyzeRectV4(warped, RECT, RECT);
+  const s = parseInt(sens.value,10); // 1..20
+  const result = detectBlobsDoG(warped, RECT, RECT, s);
 
+  // draw
   rectCtx.putImageData(warped, 0, 0);
   rectCtx.lineWidth = 3;
-
-  rectCtx.strokeStyle = "#ffd400";
-  for (const p of small){
-    rectCtx.beginPath();
-    rectCtx.arc(p.cx, p.cy, Math.max(5, p.dPx/2), 0, Math.PI*2);
-    rectCtx.stroke();
-  }
-
   rectCtx.strokeStyle = "#00ff00";
-  let sum = 0;
-  for (const p of grow){
+  let sum=0;
+  for(const p of result){
     sum += p.dMm;
     rectCtx.beginPath();
-    rectCtx.arc(p.cx, p.cy, Math.max(6, p.dPx/2), 0, Math.PI*2);
+    rectCtx.arc(p.x, p.y, Math.max(6, p.r), 0, Math.PI*2);
     rectCtx.stroke();
   }
-
-  const avg = grow.length ? (sum/grow.length).toFixed(1) : "0.0";
+  const n = result.length;
+  const avg = n ? (sum/n).toFixed(1) : "0.0";
   setOut(
-    `Пины 2–4 мм (мелочь): ${small.length}\n`+
-    `Пины 4–12 мм (в рост): ${grow.length}\n`+
-    `Средний диаметр (в рост): ${avg} мм\n`+
-    `Масштаб: ${mmPerPx.toFixed(4)} мм/px`,
-    (grow.length>0) ? "ok" : "bad"
+    `Пины 4–12 мм (в рост): ${n}\nСредний диаметр: ${avg} мм\nSensitivity: ${s}\nМасштаб: ${mmPerPx.toFixed(4)} мм/px`,
+    n ? "ok" : "bad"
   );
 });
 
-// ---------- helpers ----------
+// ---------- image helpers ----------
 function fileToImg(f){
   return new Promise((resolve, reject) => {
     const i = new Image();
@@ -181,6 +176,7 @@ function fileToImg(f){
     i.src = URL.createObjectURL(f);
   });
 }
+
 function drawSource(){
   const maxW = 1100;
   const sc = Math.min(1, maxW / imgObj.naturalWidth);
@@ -259,80 +255,131 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ---------- analysis v4 (with mean contrast filter) ----------
-function analyzeRectV4(imageData, w, h){
-  const d=imageData.data;
-  const gray=new Float32Array(w*h);
-  for(let i=0;i<w*h;i++) gray[i]=0.2126*d[i*4]+0.7152*d[i*4+1]+0.0722*d[i*4+2];
+// ---------- DoG blob detection ----------
+function detectBlobsDoG(imageData, w, h, sensitivity){
+  // sensitivity: 1..20 -> threshold
+  // lower sensitivity => higher threshold (stricter)
+  const thr = 18 - sensitivity*0.7; // ~17.3 .. ~4
+  const thr2 = Math.max(3, thr);
 
-  // background (bigger radius reduces texture)
-  const bg = boxBlur(gray,w,h,BG_RADIUS);
-
-  // v = gray - bg
-  const v = new Float32Array(w*h);
-  for(let i=0;i<w*h;i++) v[i]=gray[i]-bg[i];
-
-  // binary mask
-  let bin=new Uint8Array(w*h);
-  for(let i=0;i<w*h;i++) bin[i]=(v[i] > THR_BIN) ? 1 : 0;
-  bin = close(bin,w,h);
-
-  // components with intensity sum
-  const comps = componentsWithV(bin, v, w, h);
-
-  // convert to candidates
-  const cand = [];
-  for(const c of comps){
-    if(c.area < MIN_AREA) continue;
-    const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
-    if(circ < MIN_CIRC) continue;
-
-    const dPx=2*Math.sqrt(c.area/Math.PI);
-    const dMm=dPx*mmPerPx;
-
-    if(dMm < MIN_MM) continue;
-
-    const meanV = c.sumV / c.area; // avg contrast over background
-
-    cand.push({cx:c.cx, cy:c.cy, dPx, dMm, meanV});
+  // grayscale float
+  const d = imageData.data;
+  const g = new Float32Array(w*h);
+  for(let i=0;i<w*h;i++){
+    g[i] = 0.2126*d[i*4] + 0.7152*d[i*4+1] + 0.0722*d[i*4+2];
   }
 
-  // merge close
-  const merged = mergeClose(cand, MERGE_PX);
+  // normalize contrast a bit (remove slow background)
+  const bg = boxBlur(g,w,h,18);
+  for(let i=0;i<w*h;i++) g[i] = g[i] - bg[i]; // now local contrast
 
-  const small=[], grow=[];
-  for(const p of merged){
-    if(p.dMm >= SMALL_MIN && p.dMm < SMALL_MAX){
-      if(p.meanV >= MEAN_V_SMALL) small.push(p);
-    } else if(p.dMm >= GROW_MIN && p.dMm <= GROW_MAX){
-      if(p.meanV >= MEAN_V_GROW) grow.push(p);
-    }
+  // scales: radii from RMIN..RMAX
+  // sigma ~ r / sqrt(2)
+  const sigmas = [];
+  for(let r=RMIN; r<=RMAX; r*=1.18){
+    sigmas.push(r/1.4142);
   }
-  return {small, grow};
-}
 
-function mergeClose(list, distPx){
-  const out = [];
-  const used = new Uint8Array(list.length);
-  for(let i=0;i<list.length;i++){
-    if(used[i]) continue;
-    let best=list[i];
-    used[i]=1;
-    for(let j=i+1;j<list.length;j++){
-      if(used[j]) continue;
-      const dx=list[j].cx-best.cx, dy=list[j].cy-best.cy;
-      if(dx*dx+dy*dy <= distPx*distPx){
-        used[j]=1;
-        // keep the one with bigger diameter or higher meanV
-        if(list[j].dPx > best.dPx) best = list[j];
-        else if(list[j].meanV > best.meanV && list[j].dPx >= best.dPx*0.9) best = list[j];
+  // compute blurred images for each sigma
+  const blurs = sigmas.map(s => gaussianBlurSep(g,w,h,s));
+
+  // DoG responses
+  const candidates = [];
+  for(let k=0;k<blurs.length-1;k++){
+    const a = blurs[k], b2 = blurs[k+1];
+    const dog = new Float32Array(w*h);
+    for(let i=0;i<w*h;i++) dog[i] = a[i] - b2[i];
+
+    // local maxima (3x3) above threshold
+    // Use k scale radius approx
+    const r = sigmas[k]*1.4142;
+    for(let y=1;y<h-1;y++){
+      for(let x=1;x<w-1;x++){
+        const idx = y*w + x;
+        const v = dog[idx];
+        if(v < thr2) continue;
+        // local max
+        if(v < dog[idx-1] || v < dog[idx+1] || v < dog[idx-w] || v < dog[idx+w]) continue;
+        if(v < dog[idx-w-1] || v < dog[idx-w+1] || v < dog[idx+w-1] || v < dog[idx+w+1]) continue;
+        candidates.push({x,y,score:v,r});
       }
     }
-    out.push(best);
   }
-  return out;
+
+  // sort by score desc and do non-maximum suppression in space
+  candidates.sort((p,q)=>q.score-p.score);
+  const kept = [];
+  const minDist = 10; // px
+  const minDist2 = minDist*minDist;
+
+  for(const c of candidates){
+    let ok = true;
+    for(const k of kept){
+      const dx=c.x-k.x, dy=c.y-k.y;
+      if(dx*dx+dy*dy < minDist2){
+        ok=false; break;
+      }
+    }
+    if(!ok) continue;
+
+    // size filter in mm
+    const dMm = (2*c.r) * mmPerPx;
+    if(dMm < DMIN_MM || dMm > DMAX_MM) continue;
+
+    kept.push({
+      x:c.x, y:c.y,
+      r: c.r,
+      dMm
+    });
+    if(kept.length > 250) break; // safety
+  }
+
+  return kept;
 }
 
+// ---------- blurs ----------
+function gaussianBlurSep(src,w,h,sigma){
+  const r = Math.max(1, Math.ceil(sigma*2.5));
+  const k = gaussianKernel1D(sigma, r);
+  const tmp = new Float32Array(w*h);
+  const dst = new Float32Array(w*h);
+
+  // horizontal
+  for(let y=0;y<h;y++){
+    const row = y*w;
+    for(let x=0;x<w;x++){
+      let sum=0;
+      for(let i=-r;i<=r;i++){
+        const xx = Math.min(w-1, Math.max(0, x+i));
+        sum += src[row+xx]*k[i+r];
+      }
+      tmp[row+x]=sum;
+    }
+  }
+  // vertical
+  for(let x=0;x<w;x++){
+    for(let y=0;y<h;y++){
+      let sum=0;
+      for(let i=-r;i<=r;i++){
+        const yy = Math.min(h-1, Math.max(0, y+i));
+        sum += tmp[yy*w+x]*k[i+r];
+      }
+      dst[y*w+x]=sum;
+    }
+  }
+  return dst;
+}
+function gaussianKernel1D(sigma, r){
+  const k = new Float32Array(2*r+1);
+  const s2 = sigma*sigma*2;
+  let sum=0;
+  for(let i=-r;i<=r;i++){
+    const v = Math.exp(-(i*i)/s2);
+    k[i+r]=v; sum+=v;
+  }
+  for(let i=0;i<k.length;i++) k[i]/=sum;
+  return k;
+}
 function boxBlur(src,w,h,r){
   const dst=new Float32Array(w*h), iw=w+1, integ=new Float32Array((w+1)*(h+1));
   for(let y=1;y<=h;y++){
@@ -351,54 +398,6 @@ function boxBlur(src,w,h,r){
     }
   }
   return dst;
-}
-
-function dilate(b,w,h){
-  const o=new Uint8Array(w*h);
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
-    const p=y*w+x;
-    o[p]=b[p]||b[p-1]||b[p+1]||b[p-w]||b[p+w]||b[p-w-1]||b[p-w+1]||b[p+w-1]||b[p+w+1]?1:0;
-  }
-  return o;
-}
-function erode(b,w,h){
-  const o=new Uint8Array(w*h);
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
-    const p=y*w+x;
-    o[p]=b[p]&&b[p-1]&&b[p+1]&&b[p-w]&&b[p+w]&&b[p-w-1]&&b[p-w+1]&&b[p+w-1]&&b[p+w+1]?1:0;
-  }
-  return o;
-}
-function close(b,w,h){
-  let x = erode(dilate(b,w,h),w,h);
-  x = dilate(erode(x,w,h),w,h);
-  return x;
-}
-
-function componentsWithV(b, v, w, h){
-  const vis=new Uint8Array(w*h), st=[], res=[], id=(x,y)=>y*w+x;
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){
-    const p=id(x,y);
-    if(!b[p]||vis[p]) continue;
-
-    let area=0,sx=0,sy=0,per=0,sumV=0;
-    st.length=0; st.push(p); vis[p]=1;
-
-    while(st.length){
-      const q=st.pop(), qy=(q/w)|0, qx=q-qy*w;
-      area++; sx+=qx; sy+=qy; sumV += v[q];
-
-      const n1=q-1,n2=q+1,n3=q-w,n4=q+w;
-      if(!b[n1])per++; if(!b[n2])per++; if(!b[n3])per++; if(!b[n4])per++;
-
-      if(b[n1]&&!vis[n1]){vis[n1]=1;st.push(n1)}
-      if(b[n2]&&!vis[n2]){vis[n2]=1;st.push(n2)}
-      if(b[n3]&&!vis[n3]){vis[n3]=1;st.push(n3)}
-      if(b[n4]&&!vis[n4]){vis[n4]=1;st.push(n4)}
-    }
-    res.push({area, cx:sx/area, cy:sy/area, per, sumV});
-  }
-  return res;
 }
 </script>
 </body>
