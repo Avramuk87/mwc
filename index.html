@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — B2 Growth (Semi-auto, tuned)</title>
+<title>MWC — B (Semi-auto) + Training</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
   h1{font-size:20px;margin:0 0 8px}
-  .small{font-size:13px;color:#555;margin:6px 0}
+  .small{font-size:13px;color:#555;margin:6px 0;line-height:1.35}
   .card{border:1px solid #ddd;border-radius:12px;padding:12px;margin:10px 0}
   button{width:100%;padding:12px;border-radius:10px;border:1px solid #111;background:#111;color:#fff;font-weight:800}
   button.secondary{background:#fff;color:#111}
@@ -21,14 +21,15 @@
   .ok{color:#0a7;font-weight:800}
   .warn{color:#c90;font-weight:800}
   .bad{color:#c00;font-weight:800}
+  .pill{display:inline-block;border:1px solid #ddd;border-radius:999px;padding:4px 10px;margin:4px 6px 0 0;font-size:12px}
 </style>
 </head>
 
 <body>
-<h1>MWC — B2 (полуавто): рост Day1→Day2</h1>
+<h1>MWC — Вариант B + обучение</h1>
 <div class="small">
-Авто: находит грибы на Day2, сравнивает радиусы с Day1. На Day2: 🟢 grown, 🟡 new, 🔵 same, 🔴 excluded, 🟠 manual.<br>
-Правки Day2: Tap=toggle exclude • DoubleTap=add manual • Hold+Drag=move
+<b>Шаги:</b> 1) Day1 + Day2 → 2) «Анализ» → 3) включи «Обучение» и пометь 10–30 кружков GOOD/BAD → 4) «Обучить» → снова «Анализ».<br>
+На Day2: 🟢 grown, 🔵 same, 🟡 new, ⚪ candidate, 🔴 excluded, 🟠 manual.
 </div>
 
 <div class="card">
@@ -43,83 +44,121 @@
     <button id="show2" class="secondary" disabled>Показать Day2</button>
   </div>
 
-  <button id="analyze" disabled>Анализ (найти грибы + рост)</button>
+  <button id="analyze" disabled>Анализ</button>
+
+  <div class="row">
+    <button id="toggleTrain" class="secondary" disabled>Обучение: OFF</button>
+    <button id="train" class="secondary" disabled>Обучить по меткам</button>
+  </div>
+
+  <div class="row">
+    <button id="saveModel" class="secondary" disabled>Сохранить модель</button>
+    <button id="resetModel" class="secondary" disabled>Сбросить модель</button>
+  </div>
+
   <div class="kv" id="out">Загрузи оба фото.</div>
+
+  <div class="small">
+    <span class="pill">Обучение: Tap = GOOD</span>
+    <span class="pill">Обучение: Tap ещё раз = BAD</span>
+    <span class="pill">Обучение: третий Tap = снять метку</span>
+  </div>
 </div>
 
 <div class="card">
   <b>Просмотр</b>
   <canvas id="cv"></canvas>
-  <div class="small">На Day2 можно корректировать круги.</div>
+  <div class="small" id="hint">
+    Правки (не в обучении): Tap=exclude • DoubleTap=add manual • Hold+Drag=move
+  </div>
 
   <div class="row">
     <button id="undo" class="secondary" disabled>Undo</button>
     <button id="clearManual" class="secondary" disabled>Очистить manual</button>
-    <button id="reset" class="secondary" disabled>Сброс правок</button>
+    <button id="resetEdits" class="secondary" disabled>Сброс правок</button>
   </div>
   <div class="row">
     <button id="export" class="secondary" disabled>Экспорт JSON</button>
     <button id="savepng" class="secondary" disabled>Сохранить PNG</button>
   </div>
 
-  <div class="small kv">🟢 grown • 🟡 new • 🔵 same • 🔴 excluded • 🟠 manual</div>
+  <div class="small kv">
+🟢 grown • 🔵 same • 🟡 new • ⚪ candidate • 🔴 excluded • 🟠 manual • 🟣 GOOD label • 🟥 BAD label
+  </div>
 </div>
 
 <script>
-/* ------------------- TUNING (под твои фото) -------------------
-   Если всё ещё много мелкой “пыли” → увеличь MIN_R_PX до 12–14.
-   Если выросло всё равно 0 → уменьши GROW_PX до 1.0–1.5.
----------------------------------------------------------------- */
+/* =======================
+   БАЗОВЫЕ ПАРАМЕТРЫ
+   (после обучения они будут авто-обновляться)
+======================= */
 const WORK_MAX_W = 900;
 
-const DOG_THR = 10.0;       // было 7.0 (меньше шума)
-const NMS_MINDIST = 14;     // было 10 (меньше дублей)
+let MODEL = loadModel() || {
+  dogThr: 9.0,
+  nmsMinDist: 12,
+  minR: 8,
+  maxR: 120,
 
-const MIN_R_PX = 10;        // отрезаем мицелий (важно!)
-const MAX_R_PX = 110;
+  // круглый фильтр Day2
+  day2: { edgeMeanMin: 11, edgeCVMax: 0.70, contrastMin: 8 },
 
-const GROW_PX = 1.8;        // порог роста радиуса
-const MATCH_MAX_DIST = 18;  // поиск на Day1 рядом
+  // круглый фильтр Day1
+  day1: { edgeMeanMin: 10, edgeCVMax: 0.80, contrastMin: 6 },
 
-// круглый фильтр Day2 (строже)
-const CIRC_DAY2 = {
-  edgeMeanMin: 12,
-  edgeCVMax: 0.60,
-  contrastMin: 10
-};
-// круглый фильтр Day1 (чуть мягче, иначе всё станет "same" или "new" из-за шума)
-const CIRC_DAY1 = {
-  edgeMeanMin: 10,
-  edgeCVMax: 0.75,
-  contrastMin: 8
+  growPx: 1.6,
+  matchMaxDist: 18
 };
 
+/* ======= UI ======= */
 const img1Input = document.getElementById("img1");
 const img2Input = document.getElementById("img2");
 const show1Btn = document.getElementById("show1");
 const show2Btn = document.getElementById("show2");
 const analyzeBtn = document.getElementById("analyze");
+const toggleTrainBtn = document.getElementById("toggleTrain");
+const trainBtn = document.getElementById("train");
+const saveModelBtn = document.getElementById("saveModel");
+const resetModelBtn = document.getElementById("resetModel");
 
 const outEl = document.getElementById("out");
+const hintEl = document.getElementById("hint");
+
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d", { willReadFrequently:true });
 
 const undoBtn = document.getElementById("undo");
 const clearManualBtn = document.getElementById("clearManual");
-const resetBtn = document.getElementById("reset");
+const resetEditsBtn = document.getElementById("resetEdits");
 const exportBtn = document.getElementById("export");
 const saveBtn = document.getElementById("savepng");
 
 let day1=null, day2=null;
 let view=2;
 
+let trainingMode=false;
+
+/*
+work = {
+  W,H, dx,dy, score,
+  g2, g1a (lazy),
+  blobs2: [{
+    x,y,r, src:"auto|manual",
+    excluded:false,
+    cls:"grown|same|new|candidate",
+    match:{found,r1},
+    feat:{edgeMean, edgeCV, contrast},
+    label: 0|1|2   // 0 none, 1 good, 2 bad (только для обучения)
+  }],
+  baseBlobs2: [...]
+}
+*/
 let work=null;
 let history=[];
+
 let dragging=false, dragIdx=-1;
 let pressTimer=null;
 let lastTapTime=0, lastTapPos=null;
-
-let _g2=null, _g1a=null;
 
 function setOut(t, cls=""){
   outEl.className = "kv " + cls;
@@ -132,11 +171,21 @@ function updateUI(){
   show2Btn.disabled = !r;
   analyzeBtn.disabled = !r;
 
+  toggleTrainBtn.disabled = !work;
+  trainBtn.disabled = !work;
+  saveModelBtn.disabled = !work;
+  resetModelBtn.disabled = false;
+
   undoBtn.disabled = history.length===0;
   clearManualBtn.disabled = !(work && work.blobs2.some(b=>b.src==="manual"));
-  resetBtn.disabled = !(work && work.baseBlobs2 && work.baseBlobs2.length);
+  resetEditsBtn.disabled = !(work && work.baseBlobs2 && work.baseBlobs2.length);
+
   exportBtn.disabled = !work;
   saveBtn.disabled = !ready();
+
+  hintEl.textContent = trainingMode
+    ? "Обучение: Tap по кружку циклом GOOD → BAD → снято. Затем «Обучить»."
+    : "Правки (не в обучении): Tap=exclude • DoubleTap=add manual • Hold+Drag=move";
 }
 function pushHistory(){
   if(!work) return;
@@ -144,7 +193,6 @@ function pushHistory(){
   if(history.length>120) history.shift();
   updateUI();
 }
-function invalidateWorkBuffers(){ _g2=null; _g1a=null; }
 
 function fileToImg(f){
   return new Promise((resolve,reject)=>{
@@ -178,12 +226,15 @@ function canvasXY(ev){
 }
 function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
 
-function strokeForBlob(b){
-  if(b.excluded) return "#ff3333";     // red
+function colorForBlob(b){
+  if(b.excluded) return "#ff3333"; // red
+  if(b.label===1) return "#a855f7"; // purple GOOD label
+  if(b.label===2) return "#ff0066"; // magenta BAD label
   if(b.src==="manual") return "#ff9900"; // orange
-  if(b.cls==="grown") return "#00aa55";  // green
-  if(b.cls==="new")   return "#ffd400";  // yellow
-  return "#2aa8ff"; // same = blue (чтобы было видно на светлом)
+  if(b.cls==="grown") return "#00aa55"; // green
+  if(b.cls==="new") return "#ffd400"; // yellow
+  if(b.cls==="same") return "#2aa8ff"; // blue
+  return "#ffffff"; // candidate
 }
 
 function redraw(){
@@ -198,29 +249,33 @@ function redraw(){
     for(const b of work.blobs2){
       const x=b.x*sx, y=b.y*sy;
       const r=Math.max(8, b.r*sx);
-      ctx.strokeStyle = strokeForBlob(b);
+      ctx.strokeStyle = colorForBlob(b);
       ctx.beginPath();
       ctx.arc(x,y,r,0,Math.PI*2);
       ctx.stroke();
     }
 
+    const all = work.blobs2.filter(b=>!b.excluded).length;
     const grown = work.blobs2.filter(b=>!b.excluded && b.cls==="grown").length;
     const news  = work.blobs2.filter(b=>!b.excluded && b.cls==="new").length;
-    const all   = work.blobs2.filter(b=>!b.excluded).length;
+    const goodL = work.blobs2.filter(b=>b.label===1).length;
+    const badL  = work.blobs2.filter(b=>b.label===2).length;
 
     ctx.font="14px ui-monospace, Menlo, monospace";
     ctx.fillStyle="rgba(0,0,0,.55)";
-    ctx.fillRect(8,8,520,70);
+    ctx.fillRect(8,8,560,72);
     ctx.fillStyle="#fff";
     ctx.fillText(`all: ${all}  grown: ${grown}  new: ${news}`, 14, 28);
-    ctx.fillText(`align dx=${work.dx}, dy=${work.dy}`, 14, 46);
-    ctx.fillText(`kept=${work.meta.kept}  rejected=${work.meta.rejected}`, 14, 64);
+    ctx.fillText(`labels good: ${goodL}  bad: ${badL}  training: ${trainingMode?"ON":"OFF"}`, 14, 46);
+    ctx.fillText(`model: minR=${MODEL.minR} dogThr=${MODEL.dogThr} growPx=${MODEL.growPx}`, 14, 64);
   }
 
   updateUI();
 }
 
-/* ---------------- image processing ---------------- */
+/* =======================
+   IMAGE PROCESSING
+======================= */
 function toGray(rgba,n){
   const g=new Float32Array(n);
   for(let i=0;i<n;i++){
@@ -294,8 +349,8 @@ function detectBlobsDoG(g,w,h){
   const x=new Float32Array(w*h);
   for(let i=0;i<w*h;i++) x[i]=g[i]-bg[i];
 
-  const rMin=Math.max(MIN_R_PX, 6);
-  const rMax=Math.min(80, Math.min(w,h)*0.14);
+  const rMin=Math.max(MODEL.minR, 6);
+  const rMax=Math.min(90, Math.min(w,h)*0.16);
 
   const sigmas=[];
   for(let r=rMin; r<=rMax; r*=1.22){
@@ -315,7 +370,7 @@ function detectBlobsDoG(g,w,h){
       for(let x2=1;x2<w-1;x2++){
         const idx=y*w+x2;
         const v=dog[idx];
-        if(v < DOG_THR) continue;
+        if(v < MODEL.dogThr) continue;
         if(v < dog[idx-1] || v < dog[idx+1] || v < dog[idx-w] || v < dog[idx+w]) continue;
         if(v < dog[idx-w-1] || v < dog[idx-w+1] || v < dog[idx+w-1] || v < dog[idx+w+1]) continue;
         cand.push({x:x2,y,score:v,r});
@@ -325,10 +380,10 @@ function detectBlobsDoG(g,w,h){
 
   cand.sort((p,q)=>q.score-p.score);
   const kept=[];
-  const minD2=NMS_MINDIST*NMS_MINDIST;
+  const minD2=MODEL.nmsMinDist*MODEL.nmsMinDist;
 
   for(const c of cand){
-    if(c.r < MIN_R_PX || c.r > MAX_R_PX) continue;
+    if(c.r < MODEL.minR || c.r > MODEL.maxR) continue;
     let ok=true;
     for(const k of kept){
       const dx=c.x-k.x, dy=c.y-k.y;
@@ -336,7 +391,7 @@ function detectBlobsDoG(g,w,h){
     }
     if(!ok) continue;
     kept.push({x:c.x,y:c.y,r:c.r,score:c.score});
-    if(kept.length>450) break;
+    if(kept.length>500) break;
   }
   return kept;
 }
@@ -418,7 +473,7 @@ function shiftGray(src,W,H,dx,dy){
 }
 
 /* ---- radius + circularity ---- */
-function estimateRadiusAt(gray,W,H,cx,cy,rMin=MIN_R_PX,rMax=MAX_R_PX){
+function estimateRadiusAt(gray,W,H,cx,cy,rMin,rMax){
   const x0=Math.round(cx), y0=Math.round(cy);
   if(x0<2||y0<2||x0>=W-2||y0>=H-2) return null;
 
@@ -445,7 +500,7 @@ function estimateRadiusAt(gray,W,H,cx,cy,rMin=MIN_R_PX,rMax=MAX_R_PX){
     }
   }
   if(bestR===null) return null;
-  if(bestS < 12) return null; // чуть строже
+  if(bestS < 10) return null; // базовый порог, дальше обучением станет лучше
   return bestR;
 }
 
@@ -465,33 +520,26 @@ function circleQuality(gray,W,H,cx,cy,r){
     const ang=(k/N)*Math.PI*2;
     const cs=Math.cos(ang), sn=Math.sin(ang);
 
-    // edge at r
-    {
-      const ix=Math.round(x0+cs*r);
-      const iy=Math.round(y0+sn*r);
-      if(ix<1||iy<1||ix>=W-1||iy>=H-1) continue;
-      const i=iy*W+ix;
-      const gx=gray[i+1]-gray[i-1];
-      const gy=gray[i+W]-gray[i-W];
-      const e=Math.abs(gx)+Math.abs(gy);
-      edgeSum+=e; edgeSum2+=e*e; edgeCnt++;
-    }
+    const ixE=Math.round(x0+cs*r);
+    const iyE=Math.round(y0+sn*r);
+    if(ixE<1||iyE<1||ixE>=W-1||iyE>=H-1) continue;
+    const iE=iyE*W+ixE;
+    const gx=gray[iE+1]-gray[iE-1];
+    const gy=gray[iE+W]-gray[iE-W];
+    const e=Math.abs(gx)+Math.abs(gy);
+    edgeSum+=e; edgeSum2+=e*e; edgeCnt++;
 
-    // inside
-    {
-      const ix=Math.round(x0+cs*rin);
-      const iy=Math.round(y0+sn*rin);
-      if(ix>=0&&iy>=0&&ix<W&&iy<H){ inSum+=gray[iy*W+ix]; inCnt++; }
-    }
-    // outside
-    {
-      const ix=Math.round(x0+cs*rout);
-      const iy=Math.round(y0+sn*rout);
-      if(ix>=0&&iy>=0&&ix<W&&iy<H){ outSum+=gray[iy*W+ix]; outCnt++; }
-    }
+    const ixI=Math.round(x0+cs*rin);
+    const iyI=Math.round(y0+sn*rin);
+    if(ixI>=0&&iyI>=0&&ixI<W&&iyI<H){ inSum+=gray[iyI*W+ixI]; inCnt++; }
+
+    const ixO=Math.round(x0+cs*rout);
+    const iyO=Math.round(y0+sn*rout);
+    if(ixO>=0&&iyO>=0&&ixO<W&&iyO<H){ outSum+=gray[iyO*W+ixO]; outCnt++; }
   }
 
   if(edgeCnt<12 || inCnt<12 || outCnt<12) return {ok:false};
+
   const edgeMean=edgeSum/edgeCnt;
   const edgeStd=Math.sqrt(Math.max(1e-6, edgeSum2/edgeCnt - edgeMean*edgeMean));
   const edgeCV=edgeStd/Math.max(1e-6, edgeMean);
@@ -508,31 +556,9 @@ function passCirc(q, thr){
   return true;
 }
 
-function getWorkGrayDay2(){
-  if(_g2) return _g2;
-  const W=work.W,H=work.H;
-  const c=document.createElement("canvas");
-  c.width=W; c.height=H;
-  const x=c.getContext("2d",{willReadFrequently:true});
-  x.drawImage(day2,0,0,W,H);
-  const im=x.getImageData(0,0,W,H);
-  _g2=toGray(im.data,W*H);
-  return _g2;
-}
-function getWorkGrayDay1Aligned(){
-  if(_g1a) return _g1a;
-  const W=work.W,H=work.H;
-  const c=document.createElement("canvas");
-  c.width=W; c.height=H;
-  const x=c.getContext("2d",{willReadFrequently:true});
-  x.drawImage(day1,0,0,W,H);
-  const im=x.getImageData(0,0,W,H);
-  const g1=toGray(im.data,W*H);
-  _g1a=shiftGray(g1,W,H,work.dx,work.dy);
-  return _g1a;
-}
-
-/* ---------------- analyze ---------------- */
+/* =======================
+   ANALYZE
+======================= */
 async function runAnalyze(){
   setOut("Анализ: подготовка…","warn");
 
@@ -558,47 +584,71 @@ async function runAnalyze(){
   const {dx,dy,score}=estimateShift(g1,g2,W,H);
   const g1a=shiftGray(g1,W,H,dx,dy);
 
-  setOut("Анализ: поиск грибов на Day2…","warn");
+  setOut("Анализ: поиск кандидатов на Day2…","warn");
   const raw2=detectBlobsDoG(g2,W,H);
 
   const blobs2=[];
   let rejected=0;
 
   for(const b of raw2){
-    const r2=estimateRadiusAt(g2,W,H,b.x,b.y, MIN_R_PX, MAX_R_PX);
+    const r2=estimateRadiusAt(g2,W,H,b.x,b.y, MODEL.minR, MODEL.maxR);
     if(r2===null){ rejected++; continue; }
-    if(r2<MIN_R_PX || r2>MAX_R_PX){ rejected++; continue; }
+    if(r2<MODEL.minR || r2>MODEL.maxR){ rejected++; continue; }
 
     const q2=circleQuality(g2,W,H,b.x,b.y,r2);
-    if(!passCirc(q2, CIRC_DAY2)){ rejected++; continue; }
+    const feat={edgeMean:q2.edgeMean||0, edgeCV:q2.edgeCV||999, contrast:q2.contrast||-999};
 
-    blobs2.push({x:b.x,y:b.y,r:r2, src:"auto", excluded:false, cls:"same", match:{found:false,r1:null}});
+    // Важно: до обучения можно показывать кандидатов, даже если фильтр не проходит
+    // Но если модель уже обучена — применяем фильтр жёстко
+    const trained = !!MODEL._trained;
+    if(trained && !passCirc(q2, MODEL.day2)){ rejected++; continue; }
+
+    blobs2.push({
+      x:b.x,y:b.y,r:r2,
+      src:"auto",
+      excluded:false,
+      cls: trained ? "candidate" : "candidate",
+      match:{found:false,r1:null},
+      feat,
+      label: 0
+    });
   }
 
-  setOut("Анализ: сравнение размеров Day1 vs Day2…","warn");
+  // Сохраняем метки, если work уже был (чтобы после повторного анализа метки не слетали)
+  if(work && work.blobs2){
+    // грубое восстановление меток по близости центра
+    for(const nb of blobs2){
+      let best=null, bestD=1e18;
+      for(const ob of work.blobs2){
+        const dx=nb.x-ob.x, dy=nb.y-ob.y;
+        const d=dx*dx+dy*dy;
+        if(d<bestD && d < 18*18){ bestD=d; best=ob; }
+      }
+      if(best) nb.label = best.label || 0;
+    }
+  }
 
+  // Сравнение размеров
+  setOut("Анализ: сравнение размеров (рост)…","warn");
   for(const b of blobs2){
     let best=null;
 
-    for(let oy=-MATCH_MAX_DIST; oy<=MATCH_MAX_DIST; oy+=3){
-      for(let ox=-MATCH_MAX_DIST; ox<=MATCH_MAX_DIST; ox+=3){
+    for(let oy=-MODEL.matchMaxDist; oy<=MODEL.matchMaxDist; oy+=3){
+      for(let ox=-MODEL.matchMaxDist; ox<=MODEL.matchMaxDist; ox+=3){
         const cx=b.x+ox, cy=b.y+oy;
         if(cx<2||cy<2||cx>=W-2||cy>=H-2) continue;
 
-        const r1=estimateRadiusAt(g1a,W,H,cx,cy, MIN_R_PX, MAX_R_PX);
+        const r1=estimateRadiusAt(g1a,W,H,cx,cy, MODEL.minR, MODEL.maxR);
         if(r1===null) continue;
 
         const q1=circleQuality(g1a,W,H,cx,cy,r1);
-        if(!passCirc(q1, CIRC_DAY1)) continue;
+        if(MODEL._trained && !passCirc(q1, MODEL.day1)) continue; // требуем “грибность” на Day1
 
-        // score: prefer near center + similar size
         const d2=ox*ox+oy*oy;
         const clos = 1/(1+Math.abs(r1-b.r));
-        const score = clos / (1 + d2*0.02);
+        const scv = clos / (1 + d2*0.02);
 
-        if(!best || score>best.score){
-          best={r1, score};
-        }
+        if(!best || scv>best.score) best={r1, score:scv};
       }
     }
 
@@ -607,95 +657,202 @@ async function runAnalyze(){
       b.match={found:false,r1:null};
     }else{
       b.match={found:true,r1:best.r1};
-      b.cls = (b.r - best.r1) >= GROW_PX ? "grown" : "same";
+      b.cls = (b.r - best.r1) >= MODEL.growPx ? "grown" : "same";
     }
   }
 
-  work={
+  work = {
     W,H, dx,dy, score,
+    _g2: g2,
+    _g1a: g1a,
     blobs2,
     baseBlobs2: JSON.parse(JSON.stringify(blobs2)),
-    meta:{sc, kept:blobs2.length, rejected, params:{
-      DOG_THR,NMS_MINDIST,MIN_R_PX,MAX_R_PX,GROW_PX,MATCH_MAX_DIST,CIRC_DAY2,CIRC_DAY1
-    }}
+    meta:{kept:blobs2.length, rejected}
   };
   history=[];
-  invalidateWorkBuffers();
   view=2;
 
-  const grownN=blobs2.filter(b=>!b.excluded && b.cls==="grown").length;
-  const newN=blobs2.filter(b=>!b.excluded && b.cls==="new").length;
-  const allN=blobs2.filter(b=>!b.excluded).length;
+  const all=blobs2.filter(b=>!b.excluded).length;
+  const grown=blobs2.filter(b=>!b.excluded && b.cls==="grown").length;
+  const news=blobs2.filter(b=>!b.excluded && b.cls==="new").length;
 
   setOut(
 `Готово.
 Сдвиг: dx=${dx}, dy=${dy} (score=${score.toFixed(1)})
-Найдено грибов (Day2): ${allN}
-Выросло: ${grownN}
-Новые: ${newN}
+Найдено (Day2): ${all}   Выросло: ${grown}   Новые: ${news}
 Отбраковано: ${rejected}
-Порог роста: +${GROW_PX}px радиуса
-MIN_R_PX: ${MIN_R_PX}  DOG_THR: ${DOG_THR}`, "ok");
+Модель: minR=${MODEL.minR}, dogThr=${MODEL.dogThr}, growPx=${MODEL.growPx}
+Обучена: ${MODEL._trained ? "ДА" : "НЕТ"}`, "ok");
 
   redraw();
 }
 
-/* --------- Editing Day2 --------- */
-function toggleExcludeAt(x,y){
-  const idx=nearestBlobIdx(x,y,28);
-  if(idx<0) return;
-  pushHistory();
-  work.blobs2[idx].excluded=!work.blobs2[idx].excluded;
-  redraw();
+/* =======================
+   TRAINING
+   Ты ставишь метки GOOD/BAD на кружках Day2.
+   Мы автоматически подбираем пороги:
+   - minR
+   - day2 edgeMean/edgeCV/contrast
+   - dogThr не трогаем жёстко (оставляем), но можно немного подтянуть
+======================= */
+function percentile(arr, p){
+  if(!arr.length) return null;
+  const a=[...arr].sort((x,y)=>x-y);
+  const idx = Math.min(a.length-1, Math.max(0, Math.round((p/100)*(a.length-1))));
+  return a[idx];
 }
-function addManualAt(x,y){
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+function trainFromLabels(){
   if(!work) return;
-  const sx=work.W/cv.width, sy=work.H/cv.height;
-  const wx=x*sx, wy=y*sy;
 
-  pushHistory();
-  const g2=getWorkGrayDay2();
-  const g1a=getWorkGrayDay1Aligned();
+  const good = work.blobs2.filter(b=>b.label===1 && !b.excluded);
+  const bad  = work.blobs2.filter(b=>b.label===2 && !b.excluded);
 
-  let r=estimateRadiusAt(g2,work.W,work.H,wx,wy, MIN_R_PX, MAX_R_PX);
-  if(r===null) r=Math.max(18, MIN_R_PX);
-
-  const b={x:wx,y:wy,r, src:"manual", excluded:false, cls:"new", match:{found:false,r1:null}};
-
-  // try classify vs Day1
-  const r1=estimateRadiusAt(g1a,work.W,work.H,wx,wy, MIN_R_PX, MAX_R_PX);
-  if(r1!==null){
-    const q1=circleQuality(g1a,work.W,work.H,wx,wy,r1);
-    if(passCirc(q1, CIRC_DAY1)){
-      b.match={found:true,r1};
-      b.cls=(r-r1)>=GROW_PX ? "grown" : "same";
-    }
+  if(good.length < 6 || bad.length < 6){
+    setOut(`Для обучения нужно минимум ~6 GOOD и ~6 BAD. Сейчас GOOD=${good.length}, BAD=${bad.length}.`, "warn");
+    return;
   }
-  work.blobs2.push(b);
-  redraw();
+
+  // берём признаки
+  const g_edgeMean = good.map(b=>b.feat.edgeMean);
+  const g_edgeCV   = good.map(b=>b.feat.edgeCV);
+  const g_contrast = good.map(b=>b.feat.contrast);
+  const g_r        = good.map(b=>b.r);
+
+  const b_edgeMean = bad.map(b=>b.feat.edgeMean);
+  const b_edgeCV   = bad.map(b=>b.feat.edgeCV);
+  const b_contrast = bad.map(b=>b.feat.contrast);
+  const b_r        = bad.map(b=>b.r);
+
+  // ЛОГИКА ПОРОГОВ:
+  // - edgeMeanMin: чуть ниже “слабых” good, но выше большей части bad
+  // - edgeCVMax: чуть выше “плохих” good, но ниже большинства bad
+  // - contrastMin: чуть ниже слабых good, но выше bad
+
+  const edgeMeanMin = clamp(
+    Math.max( percentile(g_edgeMean, 15) - 1.0, percentile(b_edgeMean, 70) ),
+    6, 30
+  );
+  const edgeCVMax = clamp(
+    Math.min( percentile(g_edgeCV, 85) + 0.05, percentile(b_edgeCV, 30) ),
+    0.30, 0.95
+  );
+  const contrastMin = clamp(
+    Math.max( percentile(g_contrast, 15) - 1.0, percentile(b_contrast, 70) ),
+    2, 30
+  );
+
+  // minR: берём нижний хвост good (чтобы мицелий не проходил)
+  const minR = clamp( Math.round(percentile(g_r, 10)), 6, 20 );
+
+  // Записываем в модель
+  MODEL.day2 = { edgeMeanMin, edgeCVMax, contrastMin };
+
+  // Day1 делаем чуть мягче, чтобы “старые грибы” чаще находились
+  MODEL.day1 = {
+    edgeMeanMin: clamp(edgeMeanMin - 1.0, 5, 25),
+    edgeCVMax:   clamp(edgeCVMax + 0.10, 0.35, 0.98),
+    contrastMin: clamp(contrastMin - 2.0, 1, 25)
+  };
+
+  MODEL.minR = minR;
+  MODEL._trained = true;
+
+  // подсказка: dogThr можно слегка поднять, если bad сильно больше good
+  // но оставим как есть (стабильнее). При желании можно будет добавить.
+
+  saveModel(MODEL);
+
+  setOut(
+`Обучение завершено ✅
+GOOD=${good.length}, BAD=${bad.length}
+Новые пороги (Day2):
+  edgeMeanMin=${MODEL.day2.edgeMeanMin.toFixed(1)}
+  edgeCVMax=${MODEL.day2.edgeCVMax.toFixed(2)}
+  contrastMin=${MODEL.day2.contrastMin.toFixed(1)}
+minR=${MODEL.minR}
+Сохранил модель. Нажми «Анализ» ещё раз.`, "ok");
 }
 
+/* =======================
+   EDITING / LABELING
+======================= */
 function nearestBlobIdx(x,y,px=26){
   if(!work || view!==2) return -1;
   const sx=work.W/cv.width, sy=work.H/cv.height;
   const wx=x*sx, wy=y*sy;
   const p={x:wx,y:wy};
   const max2=(px*sx)*(px*sx);
+
   let best=-1, bestD=1e18;
   for(let i=0;i<work.blobs2.length;i++){
     const b=work.blobs2[i];
-    const d=dist2(b,p);
+    const dx=b.x-p.x, dy=b.y-p.y;
+    const d=dx*dx+dy*dy;
     if(d<max2 && d<bestD){ bestD=d; best=i; }
   }
   return best;
 }
 
+function cycleLabelAt(x,y){
+  const idx=nearestBlobIdx(x,y,28);
+  if(idx<0) return;
+  pushHistory();
+  const b=work.blobs2[idx];
+  // 0 -> 1 -> 2 -> 0
+  b.label = (b.label===0) ? 1 : (b.label===1 ? 2 : 0);
+  redraw();
+}
+
+function toggleExcludeAt(x,y){
+  const idx=nearestBlobIdx(x,y,28);
+  if(idx<0) return;
+  pushHistory();
+  work.blobs2[idx].excluded = !work.blobs2[idx].excluded;
+  redraw();
+}
+
+function addManualAt(x,y){
+  if(!work) return;
+  const sx=work.W/cv.width, sy=work.H/cv.height;
+  const wx=x*sx, wy=y*sy;
+
+  pushHistory();
+
+  const g2=work._g2, g1a=work._g1a;
+  let r=estimateRadiusAt(g2,work.W,work.H,wx,wy, MODEL.minR, MODEL.maxR);
+  if(r===null) r=Math.max(18, MODEL.minR);
+
+  const q2=circleQuality(g2,work.W,work.H,wx,wy,r);
+  const feat={edgeMean:q2.edgeMean||0, edgeCV:q2.edgeCV||999, contrast:q2.contrast||-999};
+
+  const b={x:wx,y:wy,r, src:"manual", excluded:false, cls:"candidate", match:{found:false,r1:null}, feat, label:0};
+
+  const r1=estimateRadiusAt(g1a,work.W,work.H,wx,wy, MODEL.minR, MODEL.maxR);
+  if(r1!==null){
+    const q1=circleQuality(g1a,work.W,work.H,wx,wy,r1);
+    if(!MODEL._trained || passCirc(q1, MODEL.day1)){
+      b.match={found:true,r1};
+      b.cls=(r-r1)>=MODEL.growPx ? "grown" : "same";
+    } else {
+      b.cls="new";
+    }
+  } else {
+    b.cls="new";
+  }
+
+  work.blobs2.push(b);
+  redraw();
+}
+
 function startDragAt(x,y){
+  if(trainingMode) return false;
   const idx=nearestBlobIdx(x,y,32);
   if(idx<0) return false;
   pushHistory();
   dragging=true; dragIdx=idx;
-  work.blobs2[idx].src="manual"; // помечаем как manual только если реально двигаем
+  work.blobs2[idx].src="manual";
   return true;
 }
 function moveDragTo(x,y){
@@ -707,16 +864,31 @@ function moveDragTo(x,y){
 }
 function endDrag(){ dragging=false; dragIdx=-1; }
 
-/* -------- UI wiring -------- */
+/* =======================
+   STORAGE (MODEL)
+======================= */
+function saveModel(m){
+  try{ localStorage.setItem("MWC_MODEL_V1", JSON.stringify(m)); }catch(e){}
+}
+function loadModel(){
+  try{
+    const s=localStorage.getItem("MWC_MODEL_V1");
+    return s ? JSON.parse(s) : null;
+  }catch(e){ return null; }
+}
+
+/* =======================
+   UI HANDLERS
+======================= */
 img1Input.addEventListener("change", async ()=>{
-  work=null; history=[]; invalidateWorkBuffers();
+  work=null; history=[]; trainingMode=false;
   try{ day1=await fileToImg(img1Input.files[0]); setOut("Day1 загружено. Загрузи Day2.","warn"); }
   catch(e){ day1=null; setOut("Ошибка загрузки Day1.","bad"); }
   if(ready()){ view=2; setOut("Оба фото загружены. Нажми «Анализ».","ok"); }
   redraw(); updateUI();
 });
 img2Input.addEventListener("change", async ()=>{
-  work=null; history=[]; invalidateWorkBuffers();
+  work=null; history=[]; trainingMode=false;
   try{ day2=await fileToImg(img2Input.files[0]); setOut("Day2 загружено. Загрузи Day1.","warn"); }
   catch(e){ day2=null; setOut("Ошибка загрузки Day2.","bad"); }
   if(ready()){ view=2; setOut("Оба фото загружены. Нажми «Анализ».","ok"); }
@@ -728,8 +900,35 @@ show2Btn.addEventListener("click", ()=>{ view=2; redraw(); });
 
 analyzeBtn.addEventListener("click", async ()=>{
   if(!ready()) return;
-  invalidateWorkBuffers();
   await runAnalyze();
+});
+
+toggleTrainBtn.addEventListener("click", ()=>{
+  if(!work) return;
+  trainingMode = !trainingMode;
+  toggleTrainBtn.textContent = `Обучение: ${trainingMode ? "ON" : "OFF"}`;
+  redraw();
+});
+
+trainBtn.addEventListener("click", ()=>{
+  trainFromLabels();
+});
+
+saveModelBtn.addEventListener("click", ()=>{
+  saveModel(MODEL);
+  setOut("Модель сохранена ✅ (localStorage).", "ok");
+});
+
+resetModelBtn.addEventListener("click", ()=>{
+  MODEL = {
+    dogThr: 9.0, nmsMinDist: 12, minR: 8, maxR: 120,
+    day2:{edgeMeanMin:11, edgeCVMax:0.70, contrastMin:8},
+    day1:{edgeMeanMin:10, edgeCVMax:0.80, contrastMin:6},
+    growPx:1.6, matchMaxDist:18
+  };
+  try{ localStorage.removeItem("MWC_MODEL_V1"); }catch(e){}
+  setOut("Модель сброшена. Нажми «Анализ».", "warn");
+  redraw();
 });
 
 undoBtn.addEventListener("click", ()=>{
@@ -743,26 +942,27 @@ clearManualBtn.addEventListener("click", ()=>{
   work.blobs2=work.blobs2.filter(b=>b.src!=="manual");
   redraw();
 });
-resetBtn.addEventListener("click", ()=>{
+resetEditsBtn.addEventListener("click", ()=>{
   if(!work) return;
   history=[];
   work.blobs2=JSON.parse(JSON.stringify(work.baseBlobs2));
   redraw();
 });
+
 exportBtn.addEventListener("click", ()=>{
   if(!work) return;
   const payload={
-    version:"MWC_B2_TUNED",
+    version:"MWC_B_TRAINING_V1",
     created_at:new Date().toISOString(),
+    model: MODEL,
     align:{dx:work.dx,dy:work.dy,score:work.score},
     work_size:{W:work.W,H:work.H},
-    meta:work.meta,
     blobs_day2:work.blobs2
   };
   const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
   const a=document.createElement("a");
   a.href=URL.createObjectURL(blob);
-  a.download="mwc_b2_tuned.json";
+  a.download="mwc_training_export.json";
   a.click();
 });
 saveBtn.addEventListener("click", ()=>{
@@ -774,7 +974,7 @@ saveBtn.addEventListener("click", ()=>{
   a.click();
 });
 
-/* --- gestures --- */
+/* ===== gestures ===== */
 cv.addEventListener("mousedown",(ev)=>{
   if(!work||view!==2) return;
   const p=canvasXY(ev);
@@ -789,14 +989,20 @@ cv.addEventListener("mouseup",(ev)=>{
   if(!work||view!==2) return;
   clearTimeout(pressTimer);
   const p=canvasXY(ev);
+
   if(dragging){ endDrag(); return; }
 
   const now=Date.now();
   const isDouble=(now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
   lastTapTime=now; lastTapPos=p;
 
-  if(isDouble) addManualAt(p.x,p.y);
-  else toggleExcludeAt(p.x,p.y);
+  if(trainingMode){
+    if(isDouble) return;
+    cycleLabelAt(p.x,p.y);
+  }else{
+    if(isDouble) addManualAt(p.x,p.y);
+    else toggleExcludeAt(p.x,p.y);
+  }
 });
 
 cv.addEventListener("touchstart",(ev)=>{
@@ -805,15 +1011,22 @@ cv.addEventListener("touchstart",(ev)=>{
   const t=ev.touches[0];
   const p=canvasXY(t);
 
-  pressTimer=setTimeout(()=> startDragAt(p.x,p.y), 180);
+  if(!trainingMode){
+    pressTimer=setTimeout(()=> startDragAt(p.x,p.y), 180);
+  }
 
   const now=Date.now();
   const isDouble=(now-lastTapTime)<260 && lastTapPos && dist2(lastTapPos,p)<18*18;
   lastTapTime=now; lastTapPos=p;
 
-  if(isDouble){
-    clearTimeout(pressTimer);
-    addManualAt(p.x,p.y);
+  if(trainingMode){
+    if(isDouble) return;
+    cycleLabelAt(p.x,p.y);
+  }else{
+    if(isDouble){
+      clearTimeout(pressTimer);
+      addManualAt(p.x,p.y);
+    }
   }
 },{passive:false});
 
@@ -831,6 +1044,8 @@ cv.addEventListener("touchend",(ev)=>{
   clearTimeout(pressTimer);
   if(dragging){ endDrag(); return; }
 
+  if(trainingMode) return;
+
   const t=ev.changedTouches[0];
   const p=canvasXY(t);
   const now=Date.now();
@@ -839,6 +1054,7 @@ cv.addEventListener("touchend",(ev)=>{
 },{passive:false});
 
 updateUI();
+setOut(`Готово. Текущая модель: minR=${MODEL.minR}, dogThr=${MODEL.dogThr}, growPx=${MODEL.growPx}.`, "ok");
 </script>
 </body>
 </html>
