@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — 2 фото: разметка + анализ роста</title>
+<title>MWC — Manual Counter</title>
 <meta name="theme-color" content="#111">
 <style>
   body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -16,47 +16,37 @@
   input[type="file"]{width:100%;margin:8px 0}
   canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:none}
   .row{display:flex;gap:10px;flex-wrap:wrap}
-  .row > button{flex:1;min-width:150px}
-  .kv{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#111;white-space:pre-wrap}
+  .row > button{flex:1;min-width:140px}
+  .kv{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;color:#111}
   .ok{color:#0a7;font-weight:800}
   .warn{color:#c90;font-weight:800}
-  .bad{color:#c00;font-weight:800}
 </style>
 </head>
 
 <body>
-<h1>MWC — 2 фото (Day1/Day2): ручная разметка + авто рост</h1>
+<h1>MWC — Ручной подсчёт грибов</h1>
 <div class="small">
-<b>Разметка:</b> Tap по грибу = метка • Tap по метке = удалить • Hold+Drag = передвинуть.<br>
-<b>Анализ:</b> оценивает “размер” гриба вокруг метки на Day1 и Day2 и на Day2 красит зелёным то, что выросло.
+<b>Как пользоваться:</b> загрузил фото → тапай по каждому грибу (ставится кружок) → сверху видишь итог.<br>
+<b>Жесты:</b> Tap=добавить • Tap по кружку=удалить • Hold+Drag=передвинуть
 </div>
 
 <div class="card">
   <b>Фото</b>
-  <div class="small">Day1</div>
-  <input id="img1" type="file" accept="image/*">
-  <div class="small">Day2</div>
-  <input id="img2" type="file" accept="image/*">
-
-  <div class="row">
-    <button id="view1" class="secondary" disabled>Показать Day1</button>
-    <button id="view2" class="secondary" disabled>Показать Day2</button>
-  </div>
-
-  <button id="analyze" disabled>Анализ роста (подсветить зелёным на Day2)</button>
-  <div class="kv" id="status">Загрузи 2 фото.</div>
+  <input id="img" type="file" accept="image/*">
+  <div class="kv" id="status">Загрузи фото.</div>
 </div>
 
 <div class="card">
   <b>Разметка</b>
   <canvas id="cv"></canvas>
-  <div class="small">🟡 метки • 🟢 выросло (после анализа на Day2) • 🔴 нет пары/не найдено</div>
+  <div class="small">🟡 — твои метки</div>
+</div>
 
+<div class="card">
   <div class="row">
     <button id="undo" class="secondary" disabled>Undo</button>
-    <button id="clear" class="secondary" disabled>Очистить метки текущего дня</button>
+    <button id="clear" class="secondary" disabled>Очистить</button>
   </div>
-
   <div class="row">
     <button id="export" class="secondary" disabled>Экспорт JSON</button>
     <button id="savepng" class="secondary" disabled>Сохранить PNG</button>
@@ -64,12 +54,7 @@
 </div>
 
 <script>
-const img1Input = document.getElementById("img1");
-const img2Input = document.getElementById("img2");
-const view1Btn  = document.getElementById("view1");
-const view2Btn  = document.getElementById("view2");
-const analyzeBtn= document.getElementById("analyze");
-
+const input = document.getElementById("img");
 const cv = document.getElementById("cv");
 const ctx = cv.getContext("2d", { willReadFrequently:true });
 
@@ -79,89 +64,236 @@ const clearBtn = document.getElementById("clear");
 const exportBtn = document.getElementById("export");
 const savePngBtn = document.getElementById("savepng");
 
-let img1=null, img2=null;
-let marks1=[]; // {x,y}
-let marks2=[]; // {x,y}
-let history=[]; // stack {day, marks1, marks2, analysis}
-let day=1; // 1 or 2
+let imgObj = null;
+let marks = [];     // {x,y}
+let history = [];   // stack of JSON strings
+let dragging = false;
+let dragIdx = -1;
+let pressTimer = null;
 
-// analysis results (drawn when day=2)
-let analysis = null;
-/*
-analysis = {
-  pairs: [{i1,i2, r1, r2, grown, ok}],
-  grownIdx2: Set([...]),
-  unmatched2: Set([...]),
-  meta: {maxDist, growPx, maxR}
-}
-*/
-
-let dragging=false, dragIdx=-1, pressTimer=null;
-
+// --- UI ---
 function setStatus(text, cls=""){
   statusEl.className = "kv " + cls;
   statusEl.textContent = text;
 }
-function ready(){ return !!(img1 && img2); }
-function curMarks(){ return day===1 ? marks1 : marks2; }
-
-function pushHistory(){
-  history.push({
-    day,
-    marks1: JSON.stringify(marks1),
-    marks2: JSON.stringify(marks2),
-    analysis: JSON.stringify(analysis)
-  });
-  if(history.length>120) history.shift();
-  updateUI();
-}
-
 function updateUI(){
-  const r = ready();
-  view1Btn.disabled = !r;
-  view2Btn.disabled = !r;
-  analyzeBtn.disabled = !r || marks1.length===0 || marks2.length===0;
-
-  undoBtn.disabled = history.length===0;
-  clearBtn.disabled = curMarks().length===0;
-  exportBtn.disabled = !r;
-  savePngBtn.disabled = !(img1 || img2);
+  undoBtn.disabled = history.length === 0;
+  clearBtn.disabled = marks.length === 0;
+  exportBtn.disabled = marks.length === 0;
+  savePngBtn.disabled = !imgObj;
 }
 
+// --- helpers ---
 function fileToImg(f){
-  return new Promise((resolve,reject)=>{
+  return new Promise((resolve, reject) => {
     const i = new Image();
-    i.onload = ()=>resolve(i);
+    i.onload = () => resolve(i);
     i.onerror = reject;
     i.src = URL.createObjectURL(f);
   });
 }
-
-function fitCanvasToImage(image){
-  const maxW = 1100;
-  const sc = Math.min(1, maxW / image.naturalWidth);
-  cv.width  = Math.round(image.naturalWidth * sc);
-  cv.height = Math.round(image.naturalHeight * sc);
+function pushHistory(){
+  history.push(JSON.stringify(marks));
+  if(history.length > 120) history.shift();
+  updateUI();
 }
-
 function canvasXY(ev){
   const r = cv.getBoundingClientRect();
-  const x = (ev.clientX - r.left) * (cv.width / r.width);
-  const y = (ev.clientY - r.top)  * (cv.height/ r.height);
+  const x = (ev.clientX - r.left) * (cv.width  / r.width);
+  const y = (ev.clientY - r.top)  * (cv.height / r.height);
   return {x,y};
 }
 function dist2(a,b){ const dx=a.x-b.x, dy=a.y-b.y; return dx*dx+dy*dy; }
 function nearestMark(x,y, px=26){
-  const arr = curMarks();
-  const p={x,y};
-  const max2=px*px;
-  let best=-1, bestD=1e18;
-  for(let i=0;i<arr.length;i++){
-    const d=dist2(arr[i],p);
-    if(d<max2 && d<bestD){bestD=d;best=i;}
+  const p = {x,y};
+  const max2 = px*px;
+  let best = -1, bestD = 1e18;
+  for(let i=0;i<marks.length;i++){
+    const d = dist2(marks[i], p);
+    if(d < max2 && d < bestD){ bestD = d; best = i; }
   }
   return best;
 }
 
-function redraw(){
-  const img
+// --- draw ---
+function draw(){
+  if(!imgObj) return;
+
+  ctx.drawImage(imgObj, 0, 0, cv.width, cv.height);
+
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "#ffd400"; // yellow
+  for(const m of marks){
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, 10, 0, Math.PI*2);
+    ctx.stroke();
+  }
+
+  setStatus(`Отмечено грибов: ${marks.length}`, marks.length ? "ok" : "warn");
+  updateUI();
+}
+
+// --- load image ---
+input.addEventListener("change", async ()=>{
+  marks = [];
+  history = [];
+  dragging = false;
+  dragIdx = -1;
+
+  try{
+    imgObj = await fileToImg(input.files[0]);
+
+    // fit canvas to image (limit width)
+    const maxW = 1100;
+    const sc = Math.min(1, maxW / imgObj.naturalWidth);
+    cv.width  = Math.round(imgObj.naturalWidth * sc);
+    cv.height = Math.round(imgObj.naturalHeight * sc);
+
+    setStatus("Фото загружено. Тапай по грибам, чтобы отметить.", "warn");
+    draw();
+  }catch(e){
+    imgObj = null;
+    setStatus("Ошибка загрузки фото.", "");
+    updateUI();
+  }
+});
+
+// --- actions ---
+function addMark(x,y){
+  pushHistory();
+  marks.push({x,y});
+  draw();
+}
+function removeMark(idx){
+  if(idx < 0) return;
+  pushHistory();
+  marks.splice(idx, 1);
+  draw();
+}
+function startDrag(x,y){
+  const idx = nearestMark(x,y,26);
+  if(idx < 0) return false;
+  pushHistory();
+  dragging = true;
+  dragIdx = idx;
+  return true;
+}
+function moveDrag(x,y){
+  if(!dragging || dragIdx < 0) return;
+  marks[dragIdx].x = x;
+  marks[dragIdx].y = y;
+  draw();
+}
+function endDrag(){
+  dragging = false;
+  dragIdx = -1;
+}
+
+// --- mouse support ---
+cv.addEventListener("mousedown", (ev)=>{
+  if(!imgObj) return;
+  const p = canvasXY(ev);
+  pressTimer = setTimeout(()=> startDrag(p.x,p.y), 180);
+});
+cv.addEventListener("mousemove", (ev)=>{
+  if(!imgObj) return;
+  if(!dragging) return;
+  const p = canvasXY(ev);
+  moveDrag(p.x,p.y);
+});
+cv.addEventListener("mouseup", (ev)=>{
+  if(!imgObj) return;
+  clearTimeout(pressTimer);
+
+  const p = canvasXY(ev);
+  if(dragging){
+    endDrag();
+    draw();
+    return;
+  }
+
+  const idx = nearestMark(p.x,p.y,18);
+  if(idx >= 0) removeMark(idx);
+  else addMark(p.x,p.y);
+});
+
+// --- iOS touch support (reliable) ---
+cv.addEventListener("touchstart", (ev)=>{
+  if(!imgObj) return;
+  ev.preventDefault();
+  const t = ev.touches[0];
+  const p = canvasXY(t);
+
+  pressTimer = setTimeout(()=>{
+    startDrag(p.x,p.y);
+  }, 180);
+}, {passive:false});
+
+cv.addEventListener("touchmove", (ev)=>{
+  if(!imgObj) return;
+  ev.preventDefault();
+  if(!dragging) return;
+  const t = ev.touches[0];
+  const p = canvasXY(t);
+  moveDrag(p.x,p.y);
+}, {passive:false});
+
+cv.addEventListener("touchend", (ev)=>{
+  if(!imgObj) return;
+  ev.preventDefault();
+  clearTimeout(pressTimer);
+
+  if(dragging){
+    endDrag();
+    draw();
+    return;
+  }
+
+  // treat as tap: remove if near, else add
+  // use last known touch position from changedTouches
+  const t = ev.changedTouches[0];
+  const p = canvasXY(t);
+  const idx = nearestMark(p.x,p.y,18);
+  if(idx >= 0) removeMark(idx);
+  else addMark(p.x,p.y);
+}, {passive:false});
+
+// --- buttons ---
+undoBtn.addEventListener("click", ()=>{
+  if(!history.length) return;
+  marks = JSON.parse(history.pop());
+  draw();
+});
+clearBtn.addEventListener("click", ()=>{
+  if(!marks.length) return;
+  pushHistory();
+  marks = [];
+  draw();
+});
+exportBtn.addEventListener("click", ()=>{
+  const payload = {
+    version: "MWC_MANUAL_COUNTER_v1",
+    created_at: new Date().toISOString(),
+    count: marks.length,
+    marks: marks
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "mwc_manual_marks.json";
+  a.click();
+});
+savePngBtn.addEventListener("click", ()=>{
+  if(!imgObj) return;
+  draw(); // ensure latest
+  const a = document.createElement("a");
+  a.href = cv.toDataURL("image/png");
+  a.download = "mwc_manual_marked.png";
+  a.click();
+});
+
+// init
+updateUI();
+</script>
+</body>
+</html>
