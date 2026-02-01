@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MWC — A1.6 FINAL</title>
+<title>MWC — A1.6 FINAL tuned</title>
 <meta name="theme-color" content="#111">
 <style>
 body{font-family:-apple-system,system-ui,Arial;margin:16px}
@@ -25,7 +25,7 @@ canvas{width:100%;border:1px solid #ddd;border-radius:12px;touch-action:manipula
 </head>
 
 <body>
-<h1>MWC — A1.6 FINAL (пины 4–12 мм)</h1>
+<h1>MWC — A1.6 FINAL (tuned) — пины 4–12 мм</h1>
 <div class="small">
 Шаги: 1) выбери фото → 2) ткни 4 угла рамки (ЛВ→ПВ→ПН→ЛН) → 3) Анализ.
 </div>
@@ -119,18 +119,16 @@ runBtn.addEventListener("click", () => {
   if (!imgObj || corners.length !== 4) return;
   setOut("Распремление и анализ…", "warn");
 
-  // 1) Warp
   const warped = warpToRect(cSrc, corners, RECT, RECT);
   cRect.width = RECT; cRect.height = RECT;
   rectCtx.putImageData(warped, 0, 0);
 
-  // 2) Analyze
   const res = analyzeRect(warped, RECT, RECT);
 
-  // draw result
   rectCtx.putImageData(warped, 0, 0);
   rectCtx.lineWidth = 3;
   rectCtx.strokeStyle = "#00ff00";
+
   let sum = 0;
   for (const p of res){
     sum += p.dMm;
@@ -183,7 +181,7 @@ function drawSource(){
 // ---------- perspective warp ----------
 function warpToRect(sourceCanvas, srcPts, dstW, dstH){
   const dstPts = [{x:0,y:0},{x:dstW-1,y:0},{x:dstW-1,y:dstH-1},{x:0,y:dstH-1}];
-  const H = computeHomography(dstPts, srcPts); // dst -> src
+  const H = computeHomography(dstPts, srcPts);
 
   const sCtx = sourceCanvas.getContext("2d", { willReadFrequently:true });
   const sW = sourceCanvas.width, sH = sourceCanvas.height;
@@ -232,7 +230,7 @@ function solve8(A,b){
   return M.map(r=>r[n]);
 }
 
-// ---------- analysis ----------
+// ---------- analysis (TUNED) ----------
 function analyzeRect(imageData, w, h){
   const d=imageData.data;
   const gray=new Float32Array(w*h);
@@ -240,22 +238,32 @@ function analyzeRect(imageData, w, h){
 
   // local background
   const bg = boxBlur(gray,w,h,18);
+
+  // ✅ TUNED sensitivity: +12 (was +18)
   let bin=new Uint8Array(w*h);
-  for(let i=0;i<w*h;i++) bin[i]=(gray[i]>bg[i]+18)?1:0;
+  for(let i=0;i<w*h;i++) bin[i]=(gray[i]>bg[i]+12)?1:0;
+
   bin = erode(dilate(bin,w,h),w,h);
 
   const comps = cc(bin,w,h);
   const pins=[];
   for(const c of comps){
     if(c.area<18) continue;
+
     const circ=(c.per>0)?(4*Math.PI*c.area/(c.per*c.per)):0;
-    if(circ<0.28) continue;
+
+    // ✅ TUNED circularity: 0.22 (was 0.28)
+    if(circ<0.22) continue;
+
     const dPx=2*Math.sqrt(c.area/Math.PI);
     const dMm=dPx*mmPerPx;
+
+    // keep 4–12 mm
     if(dMm>=4 && dMm<=12) pins.push({cx:c.cx,cy:c.cy,dPx,dMm});
   }
   return pins;
 }
+
 function boxBlur(src,w,h,r){
   const dst=new Float32Array(w*h), iw=w+1, integ=new Float32Array((w+1)*(h+1));
   for(let y=1;y<=h;y++){ let s=0; for(let x=1;x<=w;x++){ s+=src[(y-1)*w+(x-1)]; integ[y*iw+x]=integ[(y-1)*iw+x]+s; } }
